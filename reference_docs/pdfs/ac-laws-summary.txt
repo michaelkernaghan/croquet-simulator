@@ -1,0 +1,206 @@
+# Association Croquet Laws Summary for Simulator
+# Extracted from AC Laws 7th Edition - Key rules for gameplay implementation
+
+================================================================================
+BASIC GAME STRUCTURE
+================================================================================
+
+OBJECTIVE:
+- Each side has two balls (Blue/Black vs Red/Yellow in singles, or partners)
+- Run all 12 hoops in order with both balls, then hit the peg with both
+- First to peg out both balls wins (26 points total per side)
+
+HOOP ORDER:
+1. Hoop 1 (front of court, right side facing south)
+2. Hoop 2 (front, left side)
+3. Hoop 3 (middle, right side)
+4. Hoop 4 (middle, left side)
+5. Hoop 5 (back, right side)
+6. Hoop 6 (back, left side)
+7. 1-back (hoop 1 from opposite direction)
+8. 2-back (hoop 2 from opposite direction)
+9. 3-back (hoop 3 from opposite direction)
+10. 4-back (hoop 4 from opposite direction)
+11. Penultimate/Penult (hoop 5 from opposite direction)
+12. Rover (hoop 6 from opposite direction)
+13. Peg out
+
+COURT DIMENSIONS:
+- Full size: 35 yards x 28 yards
+- Yard line: 1 yard inside boundary
+- Baulk lines: 1 yard inside yard line on short boundaries
+
+================================================================================
+TURN STRUCTURE
+================================================================================
+
+BASIC TURN:
+- Strike your ball once with the mallet
+- Turn ends unless you score a hoop or make a roquet
+
+ROQUET:
+- Hitting another ball with the striker's ball
+- Can roquet each of the other 3 balls once per turn
+- After running a hoop, roquet rights are restored (can hit all 4 again)
+
+CROQUET STROKE:
+- After a roquet, place striker's ball in contact with roqueted ball
+- Strike so both balls move (or would move but for obstacles)
+- After croquet stroke, take a continuation stroke
+
+FOUR-BALL BREAK:
+- Ideal break uses all 4 balls as pioneers and pivot
+- Pioneer: ball placed near next hoop
+- Pivot: ball kept near middle of court
+- Escape ball: ball used after running hoop to get to pioneer
+
+================================================================================
+HOOP RUNNING
+================================================================================
+
+SCORING A HOOP POINT:
+- Ball must start outside hoop (no part through)
+- Ball must end having passed through (at least partially)
+- Direction must be correct for that hoop
+- Ball can score in multiple strokes if legally positioned
+
+HOOP POSITION:
+- "Through" = any part of ball past non-playing side
+- "Clear" = whole ball past non-playing side
+- Ball in jaws can complete in later stroke
+
+================================================================================
+FAULTS (INVALID STROKES)
+================================================================================
+
+STRIKING FAULTS:
+- Double tap: hitting striker's ball twice in one stroke
+- Push: maintaining contact too long (not a clean hit)
+- Crush: pressing ball against hoop or peg
+- Hitting wrong ball
+- Striking with wrong end of mallet
+
+CROQUET STROKE FAULTS:
+- Croqueted ball doesn't move
+- Striker's ball not in contact at start
+- Mallet contacts croqueted ball directly
+
+CONSEQUENCE OF FAULT:
+- Turn ends immediately
+- Balls may be replaced or left at opponent's choice (depending on fault type)
+
+================================================================================
+BALL IN HAND / BALL POSITIONS
+================================================================================
+
+YARD LINE RULE:
+- Ball ending within yard of boundary is placed on yard line
+- Exception: ball at rest after running hoop stays where it is
+- Balls replaced on yard line: mark spot opposite where ball crossed
+
+WIRING:
+- A ball is "wired" from another if a hoop/peg prevents direct shot
+- Matters for lift entitlements
+
+CORNER SPOTS:
+- 1 yard from each boundary
+- Used for specific placements
+
+================================================================================
+LIFTS AND CONTACT
+================================================================================
+
+LIFT:
+- Opponent may lift to either baulk line if:
+  - Striker leaves balls wired from each other, OR
+  - Striker's ball ends in specific positions (after running 1-back or 4-back)
+
+ADVANCED PLAY RULE:
+- After running 1-back or 4-back, opponent gets lift option
+- Designed to balance advantage of making a break
+
+SUPER-ADVANCED PLAY:
+- Additional options including "contact" (place ball touching enemy ball)
+- Applied at 1-back and 4-back completion
+
+================================================================================
+PEELING
+================================================================================
+
+PEEL:
+- Sending a ball other than striker's ball through its hoop
+- Does NOT give you extra strokes (opponent's ball)
+- DOES score the point for that ball
+
+TRIPLE PEEL:
+- Peeling partner ball through 4-back, penult, and rover in one turn
+- Considered skilled play
+
+STRAIGHT PEEL:
+- Peel from directly behind hoop
+- Usually done in same stroke as running hoop yourself
+
+================================================================================
+END GAME
+================================================================================
+
+ROVER BALL:
+- Ball that has run all 12 hoops
+- Can roquet and be roqueted normally
+- Can be pegged out by any ball
+
+PEGGING OUT:
+- Hit rover ball onto peg
+- Ball is removed from game
+- Cannot peg out partner ball if it would leave opponent with a rover vs non-rover
+
+WINNING:
+- First side to peg out both balls wins
+- Score is difference in points (max 26-0)
+
+================================================================================
+COMMON TACTICAL RULES
+================================================================================
+
+TAKING CROQUET FROM A BALL:
+- Must take croquet where balls lie (with adjustment for yard line)
+- Various stroke types: drive, stop-shot, roll, pass-roll, split
+
+RUSH:
+- Roquet that sends roqueted ball to a useful position
+- "Cut rush" = at angle
+- "Straight rush" = direct line
+
+LEAVE:
+- Ball positions left at end of turn
+- "New Standard Leave" (NSL) = common defensive arrangement
+- Goal: make opponent's next turn difficult
+
+BREAK DOWN:
+- Failing to maintain the break
+- Usually from poor position or missed roquet
+- Must assess risk of continuing vs playing safe
+
+================================================================================
+SIMULATOR-SPECIFIC NOTES
+================================================================================
+
+SHOT DIFFICULTY FACTORS:
+- Distance (roquets harder at range)
+- Angle (cut rushes harder than straight)
+- Hoop approach angle matters
+- Jump shots and hampered strokes are very difficult
+
+AI DECISION POINTS:
+- Shoot at ball or lay up defensively?
+- Which ball to roquet first?
+- Where to place pioneers?
+- When to attempt peels?
+- Risk assessment: aggressive break vs safe leave
+
+BALL STATE TRACKING:
+- For each ball track: current hoop, position, whether it's a rover
+- For turn track: balls roqueted this turn, whether hoop run since last roquet
+- Reset roquet rights after each hoop
+
+================================================================================

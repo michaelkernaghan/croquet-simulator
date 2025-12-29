@@ -1,0 +1,59 @@
+{
+  "url": "http://www.oxfordcroquet.com/coach/tournament/index.asp",
+  "title": "IIS 10.0 Detailed Error - 404.0 - Not Found",
+  "content": "HTTP Error 404.0 - Not Found\nThe resource you are looking for has been removed, had its name changed, or is temporarily unavailable.\nMost likely causes:\nThe directory or file specified does not exist on the Web server.\nThe URL contains a typographical error.\nA custom filter or module, such as URLScan, restricts access to the file.\nThings you can try:\nCreate the content on the Web server.\nReview the browser URL.\nCreate a tracing rule to track failed requests for this HTTP status code and see which module is calling SetStatus. For more information about creating a tracing rule for failed requests, click here.\nDetailed Error Information:\nModule\t   IIS Web Core\nNotification\t   MapRequestHandler\nHandler\t   ASPClassic\nError Code\t   0x80070002\nRequested URL\t   http://www.oxfordcroquet.com:80/coach/tournament/index.asp\nPhysical Path\t   D:\\Inetpub\\vhosts\\oxfordcroquet.com\\httpdocs\\coach\\tournament\\index.asp\nLogon Method\t   Anonymous\nLogon User\t   Anonymous\nMore Information:\nThis error means that the file or directory does not exist on the server. Create the file or directory and try the request again.\n\nView more information »",
+  "structure": {
+    "paragraphs": [
+      {
+        "text": "View more information »",
+        "className": "",
+        "id": "",
+        "hasImage": false
+      }
+    ],
+    "headers": [
+      {
+        "level": 3,
+        "text": "HTTP Error 404.0 - Not Found",
+        "id": ""
+      },
+      {
+        "level": 4,
+        "text": "The resource you are looking for has been removed, had its name changed, or is temporarily unavailable.",
+        "id": ""
+      },
+      {
+        "level": 4,
+        "text": "Most likely causes:",
+        "id": ""
+      },
+      {
+        "level": 4,
+        "text": "Things you can try:",
+        "id": ""
+      },
+      {
+        "level": 4,
+        "text": "Detailed Error Information:",
+        "id": ""
+      },
+      {
+        "level": 4,
+        "text": "More Information:",
+        "id": ""
+      }
+    ],
+    "images": []
+  },
+  "links": [
+    {
+      "text": "here",
+      "href": "http://go.microsoft.com/fwlink/?LinkID=66439"
+    },
+    {
+      "text": "View more information »",
+      "href": "https://go.microsoft.com/fwlink/?LinkID=62293&IIS70Error=404,0,0x80070002,17763"
+    }
+  ],
+  "timestamp": "2024-12-25T15:39:08.060Z"
+}

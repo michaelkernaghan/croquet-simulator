@@ -1,0 +1,1 @@
+we wnat to create a association rules croquet simulator that will play games according to the rules and physics and we can watch. we dont wnat player input for shots as the physics for that is too complex for this project.  we will want the simulator to develop some intelligence so that it can play aout games. 
