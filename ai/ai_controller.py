@@ -234,13 +234,13 @@ class AIController:
 
         # Get which balls we're dead on (including the one we just roqueted)
         dead_on = deadness.get(striker.color, set())
-        # The roqueted ball is now dead - we can't roquet it again
+        # The roqueted ball is now dead - we can't roquet it again until we run a hoop
         dead_on = dead_on | {roqueted.color}
 
         # Find LIVE balls we can rush after this croquet stroke
         live_balls = []
         for color, ball in balls.items():
-            if color != striker.color and color not in dead_on:
+            if color != striker.color and color not in dead_on and not ball.has_pegged_out:
                 live_balls.append((color, ball))
 
         # Update break plan
@@ -253,9 +253,15 @@ class AIController:
         next_hoop = court.get_hoop_for_ball(striker.hoops_run + 1)
         hoop_after_next = court.get_hoop_for_ball(striker.hoops_run + 2)
 
-        # STRATEGIC CROQUET SHOT SELECTION
-        # Priority 1: If we have live balls, position to rush one toward hoop
-        # Priority 2: Send croqueted ball as pioneer to next hoop (or useful spot)
+        # Print croquet planning info
+        print(f"  [CROQUET] {striker.color} taking croquet on {roqueted.color}")
+        print(f"    Live balls for rush: {[c for c, _ in live_balls]}")
+        if next_hoop:
+            print(f"    Pioneer target: hoop {striker.hoops_run + 2} at {next_hoop.position}")
+
+        # STRATEGIC CROQUET SHOT SELECTION (4-ball break pattern)
+        # Priority 1: If we have live balls, position to RUSH one toward hoop
+        # Priority 2: Send croqueted ball as PIONEER to next hoop
         # Priority 3: If no live balls, position for direct hoop approach
 
         if target_hoop and live_balls:
@@ -267,11 +273,14 @@ class AIController:
             if best_rush_ball:
                 # We have a live ball to rush - this is ideal break play!
                 # Send croqueted ball as pioneer, position for rush
+                pioneer_dest = "center (pivot)"
                 if next_hoop:
                     # Pioneer position: 3-4 yards in front of next hoop
                     croqueted_target = next_hoop.position - next_hoop.direction * 4
+                    pioneer_dest = f"hoop {striker.hoops_run + 2}"
                 elif hoop_after_next:
                     croqueted_target = hoop_after_next.position - hoop_after_next.direction * 4
+                    pioneer_dest = f"hoop {striker.hoops_run + 3}"
                 else:
                     # Send to center as pivot
                     croqueted_target = Vector2(court.width / 2, court.height / 2)
@@ -284,7 +293,9 @@ class AIController:
                     stroke_type, striker, roqueted, aim_dir, power, split_angle
                 )
 
-                description = f"{striker.color.capitalize()} {result.description}: {roqueted.color} as pioneer, {rush_description}"
+                # Verbose break description
+                print(f"    SPLIT: {roqueted.color} -> {pioneer_dest}, striker -> {rush_description}")
+                description = f"{striker.color.capitalize()} {result.description}: {roqueted.color} as pioneer to {pioneer_dest}, {rush_description}"
                 return (result.striker_velocity, result.croqueted_velocity, description, stroke_type)
 
         # No live balls to rush - simpler approach

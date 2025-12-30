@@ -3,12 +3,32 @@ Learning Strategy - AI strategy that uses the hybrid learning system.
 
 Combines tactical rules, position evaluation, and shot simulation
 to make informed decisions that improve over time.
+
+BREAK-BUILDING PHILOSOPHY (from Wylie's Expert Croquet Tactics):
+The goal in Association Croquet is to run all 12 hoops in one turn.
+This requires building and maintaining a 4-ball break:
+
+4-Ball Break Pattern:
+1. ROQUET a ball near you (the pilot/reception ball)
+2. CROQUET: Send pilot as PIONEER to next-but-one hoop, position for RUSH on another ball
+3. RUSH that ball toward your target hoop
+4. CROQUET: Send that ball as new pioneer, position in front of hoop
+5. RUN THE HOOP with control (exit toward next ball)
+6. RUSH to next ball, repeat from step 3
+
+Key ball roles:
+- PIONEER: Ball pre-positioned at next hoop (or hoop after next)
+- PILOT/RECEPTION: Ball you roquet to start a break
+- PIVOT: Ball kept near center for flexibility
+- ESCAPE BALL: Ball used after running hoop to get to pioneer
 """
 import json
 import math
 import random
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, List
+from dataclasses import dataclass
+from enum import Enum, auto
 
 import config
 from models.ball import Ball, Vector2
@@ -16,6 +36,33 @@ from models.court import Court, Hoop
 from ai.learning.position_evaluator import PositionEvaluator
 from ai.learning.shot_simulator import ShotSimulator
 from ai.learning.tactical_rules import TacticalRules, ShotType
+
+
+class BreakPhase(Enum):
+    """Current phase in the break-building cycle."""
+    NO_BREAK = auto()          # Not in a break (need to roquet to start)
+    JUST_ROQUETED = auto()     # Just roqueted, need to take croquet stroke
+    CROQUET_TAKEN = auto()     # Croquet stroke done, have continuation
+    APPROACHING_HOOP = auto()  # Positioned for hoop run
+    HOOP_RUN = auto()          # Just ran hoop, continuation stroke
+    SEEKING_RUSH = auto()      # Looking for ball to rush
+
+
+@dataclass
+class BreakState:
+    """Tracks the current state of a break in progress."""
+    phase: BreakPhase = BreakPhase.NO_BREAK
+    hoops_in_break: int = 0
+
+    # Ball roles (colors)
+    pilot_ball: Optional[str] = None      # Ball at/near current hoop
+    pioneer_ball: Optional[str] = None    # Ball at next hoop
+    pivot_ball: Optional[str] = None      # Ball near center
+    escape_ball: Optional[str] = None     # Ball to rush after running hoop
+
+    # Targets for this turn
+    current_target: Optional[Vector2] = None
+    next_pioneer_target: Optional[Vector2] = None
 
 
 class LearningStrategy:
@@ -27,6 +74,7 @@ class LearningStrategy:
     - Position evaluation for assessing board states
     - Shot simulation for evaluating shot options
     - Learned power adjustment from experience
+    - BREAK-BUILDING: Strategic 4-ball break planning
     """
 
     def __init__(self, skill_level: float = 0.8):
@@ -43,6 +91,9 @@ class LearningStrategy:
         self.position_evaluator = PositionEvaluator()
         self.shot_simulator = ShotSimulator(num_simulations=20)
         self.tactical_rules = TacticalRules()
+
+        # Break state tracking - THE KEY TO PROPER CROQUET TACTICS
+        self.break_state = BreakState()
 
         # Track decisions for learning
         self.last_advice = None
@@ -63,6 +114,228 @@ class LearningStrategy:
                 pass
         return 1.0
 
+    def reset_break(self):
+        """Reset break state (called at start of new turn)."""
+        self.break_state = BreakState()
+
+    def _analyze_break_potential(
+        self,
+        ball: Ball,
+        balls: Dict[str, Ball],
+        court: Court,
+        deadness: Dict[str, set]
+    ) -> None:
+        """
+        Analyze the current position and assign ball roles for break building.
+
+        This is the heart of croquet strategy - identifying which balls can
+        serve as pioneers, pivots, and pilots for the break.
+        """
+        dead_on = deadness.get(ball.color, set())
+
+        # Get available (live) balls
+        available = []
+        for color, b in balls.items():
+            if color != ball.color and color not in dead_on and not b.has_pegged_out:
+                available.append((color, b))
+
+        if not available:
+            return
+
+        target_hoop = court.get_hoop_for_ball(ball.hoops_run)
+        next_hoop = court.get_hoop_for_ball(ball.hoops_run + 1)
+
+        if not target_hoop:
+            return
+
+        # Score each ball for each role
+        pilot_scores = {}
+        pioneer_scores = {}
+        pivot_scores = {}
+
+        for color, b in available:
+            # PILOT score: good for getting to current hoop
+            # Ideal: 2-6 yards from hoop, in front, reachable
+            to_hoop = target_hoop.position - b.position
+            dist_to_hoop = to_hoop.magnitude()
+
+            if dist_to_hoop > 0.5:
+                approach_dot = to_hoop.normalize().dot(target_hoop.direction)
+            else:
+                approach_dot = 1.0
+
+            # Pilot should be close to hoop, on approach side
+            if 1 < dist_to_hoop < 8 and approach_dot > 0:
+                pilot_score = (1 - dist_to_hoop / 10) * (0.5 + approach_dot * 0.5)
+            else:
+                pilot_score = 0.1
+
+            # Bonus if ball is between striker and hoop (good rush alignment)
+            striker_to_hoop = target_hoop.position - ball.position
+            striker_to_ball = b.position - ball.position
+            if striker_to_ball.magnitude() > 0.5 and striker_to_hoop.magnitude() > 0.5:
+                rush_alignment = striker_to_ball.normalize().dot(striker_to_hoop.normalize())
+                if rush_alignment > 0.3:
+                    pilot_score += 0.3
+
+            pilot_scores[color] = pilot_score
+
+            # PIONEER score: good for next hoop
+            if next_hoop:
+                to_next = next_hoop.position - b.position
+                dist_to_next = to_next.magnitude()
+
+                if dist_to_next > 0.5:
+                    next_approach = to_next.normalize().dot(next_hoop.direction)
+                else:
+                    next_approach = 1.0
+
+                # Pioneer should be 3-6 yards from next hoop, in front
+                if 2 < dist_to_next < 8 and next_approach > 0:
+                    pioneer_score = (1 - dist_to_next / 10) * (0.5 + next_approach * 0.5)
+                else:
+                    pioneer_score = 0.1
+            else:
+                pioneer_score = 0.1
+
+            pioneer_scores[color] = pioneer_score
+
+            # PIVOT score: near center, flexible position
+            center = Vector2(court.width / 2, court.height / 2)
+            dist_to_center = (b.position - center).magnitude()
+            pivot_scores[color] = max(0.1, 1 - dist_to_center / 15)
+
+        # Assign roles based on scores
+        assigned = set()
+
+        # Best pilot first (most important for immediate play)
+        if pilot_scores:
+            best_pilot = max(pilot_scores, key=pilot_scores.get)
+            if pilot_scores[best_pilot] > 0.25:
+                self.break_state.pilot_ball = best_pilot
+                assigned.add(best_pilot)
+
+        # Best pioneer from remaining
+        remaining_pioneer = {c: s for c, s in pioneer_scores.items() if c not in assigned}
+        if remaining_pioneer:
+            best_pioneer = max(remaining_pioneer, key=remaining_pioneer.get)
+            if remaining_pioneer[best_pioneer] > 0.2:
+                self.break_state.pioneer_ball = best_pioneer
+                assigned.add(best_pioneer)
+
+        # Best pivot from remaining
+        remaining_pivot = {c: s for c, s in pivot_scores.items() if c not in assigned}
+        if remaining_pivot:
+            best_pivot = max(remaining_pivot, key=remaining_pivot.get)
+            self.break_state.pivot_ball = best_pivot
+
+        # Set targets
+        if next_hoop:
+            self.break_state.next_pioneer_target = next_hoop.position - next_hoop.direction * 4
+
+    def _get_break_aware_shot(
+        self,
+        ball: Ball,
+        balls: Dict[str, Ball],
+        court: Court,
+        deadness: Dict[str, set],
+        strokes_remaining: int,
+        is_continuation: bool
+    ) -> Optional[Tuple[float, float, str]]:
+        """
+        Get a shot recommendation based on break-building strategy.
+
+        This implements the core 4-ball break logic:
+        - If in position for hoop: RUN IT
+        - If not in position: ROQUET to build/continue break
+        - After roquet: Position for rush to hoop (croquet stroke handles this)
+        - After running hoop: Rush to next ball to continue break
+
+        Returns:
+            Tuple of (angle, power, reason) or None if no break-aware shot
+        """
+        dead_on = deadness.get(ball.color, set())
+        target_hoop = court.get_hoop_for_ball(ball.hoops_run)
+
+        if not target_hoop:
+            return None
+
+        # Check if in position to run hoop
+        to_hoop = target_hoop.position - ball.position
+        dist_to_hoop = to_hoop.magnitude()
+
+        if dist_to_hoop > 0.5:
+            approach_dir = to_hoop.normalize()
+            approach_quality = approach_dir.dot(target_hoop.direction)
+        else:
+            approach_quality = 1.0
+
+        # PRIORITY 1: If in good hoop position, RUN THE HOOP
+        if dist_to_hoop < 5 and approach_quality > 0.5:
+            # Excellent position - run the hoop!
+            aim_point = target_hoop.position + target_hoop.direction * 2
+            to_aim = aim_point - ball.position
+            angle = math.atan2(to_aim.y, to_aim.x)
+            power = self._calculate_power_for_distance(to_aim.magnitude() + 2)
+            return (angle, power, f"RUN HOOP {ball.hoops_run + 1} (break shot)")
+
+        # PRIORITY 2: If NOT in hoop position, need to ROQUET to continue break
+        # Find the best ball to roquet based on break roles
+        best_roquet = None
+        best_roquet_score = 0
+
+        for color, other_ball in balls.items():
+            if color == ball.color or color in dead_on or other_ball.has_pegged_out:
+                continue
+
+            to_ball = other_ball.position - ball.position
+            dist = to_ball.magnitude()
+
+            if dist > 20:
+                continue  # Too far
+
+            # Base score on distance (closer = better)
+            score = max(0, 1 - dist / 20)
+
+            # HUGE bonus for pilot ball - this is THE ball to roquet for break
+            if color == self.break_state.pilot_ball:
+                score += 1.0
+
+            # Bonus for balls that give good rush to hoop
+            ball_to_hoop = target_hoop.position - other_ball.position
+            if ball_to_hoop.magnitude() > 0.5 and to_ball.magnitude() > 0.5:
+                # Check if we can rush this ball toward hoop
+                rush_alignment = to_ball.normalize().dot(ball_to_hoop.normalize())
+                if rush_alignment > 0.3:
+                    score += 0.5 * rush_alignment
+
+            # Bonus for pivot ball (reliable center position)
+            if color == self.break_state.pivot_ball:
+                score += 0.3
+
+            if score > best_roquet_score:
+                best_roquet_score = score
+                best_roquet = (color, other_ball, dist)
+
+        if best_roquet and best_roquet_score > 0.3:
+            color, other_ball, dist = best_roquet
+            to_ball = other_ball.position - ball.position
+            angle = math.atan2(to_ball.y, to_ball.x)
+            # Hit ball with follow-through
+            power = self._calculate_power_for_distance(dist + 1)
+
+            role = ""
+            if color == self.break_state.pilot_ball:
+                role = " (pilot - for rush to hoop)"
+            elif color == self.break_state.pioneer_ball:
+                role = " (pioneer)"
+            elif color == self.break_state.pivot_ball:
+                role = " (pivot)"
+
+            return (angle, power, f"ROQUET {color}{role} for break")
+
+        return None
+
     def select_shot(
         self,
         ball: Ball,
@@ -75,6 +348,13 @@ class LearningStrategy:
     ) -> Tuple[float, float]:
         """
         Select a shot using tactical analysis and simulation.
+
+        BREAK-BUILDING STRATEGY (from Wylie):
+        1. First, analyze the position and assign ball roles (pilot, pioneer, pivot)
+        2. If in position to run hoop: RUN IT (highest priority)
+        3. If not in position: ROQUET the pilot ball to build/continue break
+        4. Croquet strokes position both balls strategically
+        5. After running hoop, rush to next ball to continue break
 
         Args:
             ball: The ball to shoot
@@ -95,7 +375,46 @@ class LearningStrategy:
         self._current_deadness = deadness
         self._current_striker_color = ball.color
 
-        # Get tactical advice, passing continuation context
+        # BREAK-BUILDING: Analyze position and assign ball roles
+        self._analyze_break_potential(ball, balls, court, deadness)
+
+        # Try break-aware shot selection first
+        # This implements proper croquet tactics: roquet -> croquet -> rush -> hoop
+        break_shot = self._get_break_aware_shot(
+            ball, balls, court, deadness, strokes_remaining, is_continuation
+        )
+
+        if break_shot:
+            angle, power, reason = break_shot
+
+            # Store for learning
+            self.last_shot_type = ShotType.ROQUET if "ROQUET" in reason else ShotType.HOOP_RUN
+
+            # Apply learned power adjustment
+            adjusted_power = power * self.power_adjustment
+
+            # Add skill-based inaccuracy
+            angle_error = random.gauss(0, (1 - self.skill_level) * 0.15)
+            power_error = random.gauss(0, (1 - self.skill_level) * 0.08)
+
+            final_angle = angle + angle_error
+            final_power = adjusted_power * (1 + power_error)
+            final_power = max(1.5, min(config.MAX_SHOT_POWER, final_power))
+
+            # Print break strategy for visibility
+            roles = []
+            if self.break_state.pilot_ball:
+                roles.append(f"pilot={self.break_state.pilot_ball}")
+            if self.break_state.pioneer_ball:
+                roles.append(f"pioneer={self.break_state.pioneer_ball}")
+            if self.break_state.pivot_ball:
+                roles.append(f"pivot={self.break_state.pivot_ball}")
+            if roles:
+                print(f"  [BREAK] {ball.color}: {reason} | Roles: {', '.join(roles)}")
+
+            return (final_angle, final_power)
+
+        # Fallback to tactical rules if break-aware shot not available
         advice_list = self.tactical_rules.get_advice(
             ball, balls, court, deadness,
             strokes_remaining=strokes_remaining,
