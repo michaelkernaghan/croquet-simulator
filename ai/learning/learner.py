@@ -1232,3 +1232,163 @@ class CroquetLearner:
         return self.leave_patterns.suggest_leave_positions(
             striker_color, striker_next_hoop, actual_positions
         )
+
+    def learn_from_leave_outcome(self, leave_worked: bool, pattern_used: str):
+        """
+        Learn from a leave outcome - did it prevent opponent from scoring?
+
+        This is the core of adaptive leave learning. Over many games,
+        we learn which leave patterns are most effective.
+
+        Args:
+            leave_worked: True if opponent didn't score after our leave
+            pattern_used: Which pattern was used (NSL, OSL, DIAGONAL, CUSTOM)
+        """
+        if pattern_used not in self.leave_pattern_matches:
+            self.leave_pattern_matches[pattern_used] = {'matches': 0, 'opponent_scored': 0}
+
+        self.leave_pattern_matches[pattern_used]['matches'] += 1
+        if not leave_worked:
+            self.leave_pattern_matches[pattern_used]['opponent_scored'] += 1
+
+        # Adjust pattern preference weights based on outcomes
+        if leave_worked:
+            # Pattern worked - boost it slightly
+            if hasattr(self.leave_patterns, 'pattern_weights'):
+                current_weight = self.leave_patterns.pattern_weights.get(pattern_used, 1.0)
+                self.leave_patterns.pattern_weights[pattern_used] = min(2.0, current_weight + 0.05)
+        else:
+            # Pattern failed - reduce its weight
+            if hasattr(self.leave_patterns, 'pattern_weights'):
+                current_weight = self.leave_patterns.pattern_weights.get(pattern_used, 1.0)
+                self.leave_patterns.pattern_weights[pattern_used] = max(0.5, current_weight - 0.03)
+
+    def get_best_leave_pattern(self) -> Optional[str]:
+        """
+        Get the currently best-performing leave pattern based on learned data.
+
+        Returns:
+            Name of best pattern, or None if not enough data
+        """
+        best_pattern = None
+        best_effectiveness = 0.0
+
+        for pattern_type, stats in self.leave_pattern_matches.items():
+            matches = stats['matches']
+            if matches < 10:
+                continue  # Not enough data
+
+            effectiveness = 1.0 - (stats['opponent_scored'] / matches)
+            if effectiveness > best_effectiveness:
+                best_effectiveness = effectiveness
+                best_pattern = pattern_type
+
+        return best_pattern
+
+    def record_peel_attempt(self, peel_successful: bool, hoop_num: int, peel_type: str):
+        """
+        Record a peel attempt for learning.
+
+        Args:
+            peel_successful: Whether the peel went through
+            hoop_num: Which hoop was peeled (10=4-back, 11=penult, 12=rover)
+            peel_type: Type of peel (straight, irish, rush, etc.)
+        """
+        if not hasattr(self, 'peel_stats'):
+            self.peel_stats = {
+                'attempts': 0,
+                'successes': 0,
+                'by_hoop': {10: {'attempts': 0, 'successes': 0},
+                            11: {'attempts': 0, 'successes': 0},
+                            12: {'attempts': 0, 'successes': 0}},
+                'by_type': {}
+            }
+
+        self.peel_stats['attempts'] += 1
+        if peel_successful:
+            self.peel_stats['successes'] += 1
+
+        # Track by hoop
+        if hoop_num in self.peel_stats['by_hoop']:
+            self.peel_stats['by_hoop'][hoop_num]['attempts'] += 1
+            if peel_successful:
+                self.peel_stats['by_hoop'][hoop_num]['successes'] += 1
+
+        # Track by type
+        if peel_type not in self.peel_stats['by_type']:
+            self.peel_stats['by_type'][peel_type] = {'attempts': 0, 'successes': 0}
+        self.peel_stats['by_type'][peel_type]['attempts'] += 1
+        if peel_successful:
+            self.peel_stats['by_type'][peel_type]['successes'] += 1
+
+    def get_peel_success_rate(self, hoop_num: int = None, peel_type: str = None) -> float:
+        """
+        Get the learned peel success rate.
+
+        Args:
+            hoop_num: Optional - specific hoop (10, 11, 12)
+            peel_type: Optional - specific peel type
+
+        Returns:
+            Success rate (0-1) or 0.5 if no data
+        """
+        if not hasattr(self, 'peel_stats') or self.peel_stats['attempts'] < 5:
+            return 0.5  # Default rate if no data
+
+        if hoop_num is not None and hoop_num in self.peel_stats['by_hoop']:
+            data = self.peel_stats['by_hoop'][hoop_num]
+            if data['attempts'] >= 3:
+                return data['successes'] / data['attempts']
+
+        if peel_type is not None and peel_type in self.peel_stats['by_type']:
+            data = self.peel_stats['by_type'][peel_type]
+            if data['attempts'] >= 3:
+                return data['successes'] / data['attempts']
+
+        # Overall rate
+        return self.peel_stats['successes'] / self.peel_stats['attempts']
+
+    def get_adaptive_strategy_weights(self) -> Dict[str, float]:
+        """
+        Get current adaptive strategy weights based on learning.
+
+        These weights modify the base tactical rules based on what
+        has been working in games.
+
+        Returns:
+            Dict of strategy aspect -> weight modifier
+        """
+        weights = {
+            'aggression': 1.0,  # How aggressively to attack
+            'defense': 1.0,    # How much to prioritize defense
+            'break_building': 1.0,  # Focus on 4-ball breaks
+            'peeling': 1.0,    # Willingness to attempt peels
+        }
+
+        # Adjust based on learned data
+        if self.break_stats.get('avg_break_length', 0) > 3:
+            # We're good at breaks - emphasize them
+            weights['break_building'] = 1.2
+        elif self.break_stats.get('avg_break_length', 0) < 1:
+            # Struggling with breaks - be more cautious
+            weights['break_building'] = 0.8
+            weights['defense'] = 1.2
+
+        # Adjust peel willingness based on success rate
+        if hasattr(self, 'peel_stats') and self.peel_stats.get('attempts', 0) >= 10:
+            peel_rate = self.peel_stats['successes'] / self.peel_stats['attempts']
+            if peel_rate > 0.6:
+                weights['peeling'] = 1.3
+            elif peel_rate < 0.3:
+                weights['peeling'] = 0.7
+
+        # Adjust aggression based on leave effectiveness
+        best_leave = self.get_best_leave_pattern()
+        if best_leave and best_leave in ['NSL', 'OSL']:
+            # Defensive leaves working well - can be aggressive
+            weights['aggression'] = 1.1
+        elif best_leave == 'CUSTOM':
+            # Custom leaves not reliable - be more careful
+            weights['defense'] = 1.1
+
+        return weights

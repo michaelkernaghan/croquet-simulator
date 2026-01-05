@@ -36,6 +36,7 @@ from models.court import Court, Hoop
 from ai.learning.position_evaluator import PositionEvaluator
 from ai.learning.shot_simulator import ShotSimulator
 from ai.learning.tactical_rules import TacticalRules, ShotType
+from ai.learning.leave_patterns import get_pattern_library, LeaveType
 
 
 class BreakPhase(Enum):
@@ -91,6 +92,9 @@ class LearningStrategy:
         self.position_evaluator = PositionEvaluator()
         self.shot_simulator = ShotSimulator(num_simulations=20)
         self.tactical_rules = TacticalRules()
+
+        # Leave pattern library for deliberate leave setup
+        self.leave_patterns = get_pattern_library()
 
         # Break state tracking - THE KEY TO PROPER CROQUET TACTICS
         self.break_state = BreakState()
@@ -251,6 +255,9 @@ class LearningStrategy:
         - After roquet: Position for rush to hoop (croquet stroke handles this)
         - After running hoop: Rush to next ball to continue break
 
+        WIRING ENFORCEMENT: Balls that are wired (blocked by hoops/peg) are
+        not valid roquet targets. We must check for wiring before selecting.
+
         Returns:
             Tuple of (angle, power, reason) or None if no break-aware shot
         """
@@ -270,22 +277,34 @@ class LearningStrategy:
         else:
             approach_quality = 1.0
 
-        # PRIORITY 1: If in good hoop position, RUN THE HOOP
-        if dist_to_hoop < 5 and approach_quality > 0.5:
+        # PRIORITY 1: If in EXCELLENT hoop position, RUN THE HOOP
+        # TIGHTENED: Must be within 3 yards (not 5) with very good approach angle (0.7 not 0.5)
+        # This prevents the AI from "setting up in front of hoops" when it should be building breaks
+        # Only run hoop if we're actually in runnable position, not just nearby
+        if dist_to_hoop < 3 and approach_quality > 0.7:
             # Excellent position - run the hoop!
             aim_point = target_hoop.position + target_hoop.direction * 2
             to_aim = aim_point - ball.position
             angle = math.atan2(to_aim.y, to_aim.x)
             power = self._calculate_power_for_distance(to_aim.magnitude() + 2)
-            return (angle, power, f"RUN HOOP {ball.hoops_run + 1} (break shot)")
+            return (angle, power, f"RUN HOOP {ball.hoops_run + 1} (excellent position)")
 
         # PRIORITY 2: If NOT in hoop position, need to ROQUET to continue break
         # Find the best ball to roquet based on break roles
+        # WIRING CHECK: Skip balls we're wired from (can't legally hit them)
         best_roquet = None
         best_roquet_score = 0
 
         for color, other_ball in balls.items():
             if color == ball.color or color in dead_on or other_ball.has_pegged_out:
+                continue
+
+            # WIRING ENFORCEMENT: Check if we're wired from this ball
+            is_wired, obstruction = court.is_wired(
+                ball.position, other_ball.position, ball.radius
+            )
+            if is_wired:
+                # Can't legally roquet this ball - skip it
                 continue
 
             to_ball = other_ball.position - ball.position
@@ -317,7 +336,10 @@ class LearningStrategy:
                 best_roquet_score = score
                 best_roquet = (color, other_ball, dist)
 
-        if best_roquet and best_roquet_score > 0.3:
+        # LOWERED threshold from 0.3 to 0.15 - we WANT to roquet to build breaks
+        # The key insight: roquet is almost always better than approaching hoop directly
+        # because it earns extra strokes and allows croquet positioning
+        if best_roquet and best_roquet_score > 0.15:
             color, other_ball, dist = best_roquet
             to_ball = other_ball.position - ball.position
             angle = math.atan2(to_ball.y, to_ball.x)
@@ -332,8 +354,9 @@ class LearningStrategy:
             elif color == self.break_state.pivot_ball:
                 role = " (pivot)"
 
-            return (angle, power, f"ROQUET {color}{role} for break")
+            return (angle, power, f"ROQUET {color}{role} to build break")
 
+        # Only return None if truly no roquet available - this triggers hoop approach fallback
         return None
 
     def select_shot(
@@ -374,6 +397,27 @@ class LearningStrategy:
         # Store deadness for use in outcome evaluation
         self._current_deadness = deadness
         self._current_striker_color = ball.color
+
+        # CHECK FOR LEAVE SETUP - When break is ending, position for good leave
+        if self._should_set_leave(ball, balls, court, deadness, strokes_remaining, is_continuation):
+            leave_shot = self._get_leave_setup_shot(ball, balls, court, deadness)
+            if leave_shot:
+                angle, power, reason = leave_shot
+                print(f"  [LEAVE] {ball.color}: {reason}")
+
+                # Apply learned power adjustment
+                adjusted_power = power * self.power_adjustment
+
+                # Add skill-based inaccuracy
+                angle_error = random.gauss(0, (1 - self.skill_level) * 0.15)
+                power_error = random.gauss(0, (1 - self.skill_level) * 0.08)
+
+                final_angle = angle + angle_error
+                final_power = adjusted_power * (1 + power_error)
+                final_power = max(1.5, min(config.MAX_SHOT_POWER, final_power))
+
+                self.last_shot_type = ShotType.DEFENSIVE
+                return (final_angle, final_power)
 
         # BREAK-BUILDING: Analyze position and assign ball roles
         self._analyze_break_potential(ball, balls, court, deadness)
@@ -694,6 +738,131 @@ class LearningStrategy:
         power = self._calculate_power_for_distance(distance)
 
         return (angle, power)
+
+    def _get_leave_setup_shot(
+        self,
+        ball: Ball,
+        balls: Dict[str, Ball],
+        court: Court,
+        deadness: Dict[str, set]
+    ) -> Optional[Tuple[float, float, str]]:
+        """
+        Get a shot to deliberately set up a good leave.
+
+        Called when the break is ending (no continuation possible) to
+        position balls according to standard leave patterns.
+
+        Args:
+            ball: Current striker ball
+            balls: All balls on court
+            court: The court
+            deadness: Which balls are dead
+
+        Returns:
+            Tuple of (angle, power, reason) or None if no leave setup needed
+        """
+        # Get suggested leave positions for our next hoop
+        suggested = self.leave_patterns.suggest_leave_positions(
+            ball.color, ball.hoops_run + 1, balls
+        )
+
+        if not suggested or ball.color not in suggested:
+            return None
+
+        # Target position from leave pattern
+        target_pos = suggested[ball.color]
+
+        # Calculate shot to get there
+        delta = target_pos - ball.position
+        distance = delta.magnitude()
+
+        if distance < 1:
+            return None  # Already in position
+
+        angle = math.atan2(delta.y, delta.x)
+        power = self._calculate_power_for_distance(distance)
+
+        # Identify which pattern we're setting up
+        actual_positions = {c: b.position for c, b in balls.items()}
+        best_pattern, similarity = self.leave_patterns.find_best_matching_pattern(
+            actual_positions, ball.hoops_run + 1
+        )
+
+        pattern_name = best_pattern.name if best_pattern else "defensive"
+
+        return (angle, power, f"LEAVE SETUP: Position for {pattern_name} (dist={distance:.1f})")
+
+    def _should_set_leave(
+        self,
+        ball: Ball,
+        balls: Dict[str, Ball],
+        court: Court,
+        deadness: Dict[str, set],
+        strokes_remaining: int,
+        is_continuation: bool
+    ) -> bool:
+        """
+        Determine if we should set up a leave instead of continuing break.
+
+        CONSERVATIVE: Only set up leaves when dead on ALL balls.
+        This prevents over-defensive play that stalls games.
+
+        Returns True if:
+        - This is the last stroke (strokes_remaining == 1)
+        - We're not in continuation (no extra strokes earned)
+        - Dead on ALL other balls
+        - Not in position to run hoop
+
+        Args:
+            ball: Current striker ball
+            balls: All balls on court
+            court: The court
+            deadness: Which balls are dead
+            strokes_remaining: Strokes remaining
+            is_continuation: Whether we have continuation
+
+        Returns:
+            True if should set up leave
+        """
+        # Only on last stroke without continuation
+        if strokes_remaining > 1 or is_continuation:
+            return False
+
+        # Check if we have ANY live balls to roquet (not dead)
+        dead_on = deadness.get(ball.color, set())
+        live_ball_exists = False
+
+        for color, other_ball in balls.items():
+            if color == ball.color or other_ball.has_pegged_out:
+                continue
+            if color not in dead_on:
+                # There's a ball we're NOT dead on - try to roquet it
+                live_ball_exists = True
+                break
+
+        # If there's ANY live ball, don't set up leave - try to roquet instead
+        if live_ball_exists:
+            return False
+
+        # Check if in position to run hoop (even if dead on all balls)
+        target_hoop = court.get_hoop_for_ball(ball.hoops_run)
+        if target_hoop:
+            to_hoop = target_hoop.position - ball.position
+            dist_to_hoop = to_hoop.magnitude()
+            if dist_to_hoop > 0.5:
+                approach_dir = to_hoop.normalize()
+                approach_quality = approach_dir.dot(target_hoop.direction)
+            else:
+                approach_quality = 1.0
+
+            # If close to hoop at all, try to approach/run it
+            # Even a poor approach is better than going defensive
+            if dist_to_hoop < 8:
+                return False
+
+        # TRULY stuck: dead on all balls AND far from hoop
+        # Only NOW set up a defensive leave
+        return True
 
     def _calculate_power_for_distance(self, distance: float) -> float:
         """Calculate power needed for distance."""

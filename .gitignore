@@ -35,6 +35,9 @@ env/
 # AI learning data (generated at runtime)
 ai_data/
 
+# Reference document scans (large image files)
+reference_docs/aiton-scans/
+
 # OS files
 .DS_Store
 Thumbs.db

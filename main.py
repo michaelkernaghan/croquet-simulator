@@ -88,6 +88,13 @@ class CroquetSimulator:
         self.opening_complete = False  # True after all 4 balls played in
         self.current_ball_color_override: Optional[str] = None  # For side's choice
 
+        # Double-tap prevention: Track which ball each side played last
+        # Under AC Laws, same ball shouldn't play consecutively (except if only ball)
+        self.last_ball_played: Dict[str, Optional[str]] = {
+            "blue_black": None,
+            "red_yellow": None
+        }
+
         # Track collisions during shot
         self.shot_collisions: List[Dict] = []
 
@@ -189,11 +196,15 @@ class CroquetSimulator:
         In Association Croquet, after the opening, the side can choose
         either of their balls to play.
 
+        DOUBLE-TAP PREVENTION: Under AC Laws, the same ball shouldn't play
+        consecutively for the same side (unless it's the only ball available).
+
         Uses a comprehensive evaluation considering:
-        1. Immediate hoop-running opportunity
-        2. Break potential (roquet options, not wired)
-        3. Position quality from the position evaluator
-        4. Strategic catch-up for trailing balls
+        1. Double-tap prevention (must alternate if both balls available)
+        2. Immediate hoop-running opportunity
+        3. Break potential (roquet options, not wired)
+        4. Position quality from the position evaluator
+        5. Strategic catch-up for trailing balls
 
         Args:
             side: "blue_black" or "red_yellow"
@@ -213,6 +224,15 @@ class CroquetSimulator:
 
         if len(available) == 1:
             return available[0]
+
+        # DOUBLE-TAP PREVENTION: Remove the ball that just played (if both available)
+        last_played = self.last_ball_played.get(side)
+        if last_played and last_played in available and len(available) > 1:
+            # Must play the other ball - can't double-tap
+            available = [c for c in available if c != last_played]
+            if len(available) == 1:
+                print(f"  [DOUBLE-TAP] {side} must play {available[0]} (can't repeat {last_played})")
+                return available[0]
 
         # Get balls that are actually in play for evaluation
         balls_in_play = {c: b for c, b in self.balls.items() if self.balls_in_play.get(c, False)}
@@ -379,6 +399,117 @@ class CroquetSimulator:
             return "red"
         return None
 
+    def _handle_lift_entitlement(self):
+        """
+        Handle Advanced Play lift entitlement.
+
+        When the opponent has run 1-back or 4-back, the side with the lift
+        may place one of their balls on either baulk line.
+
+        The AI chooses strategically:
+        - Which ball to lift (usually the one in worse position)
+        - Which baulk line (based on opponent ball positions)
+        """
+        side = self.current_side
+        if side == "blue_black":
+            balls = ["blue", "black"]
+        else:
+            balls = ["red", "yellow"]
+
+        # Choose which ball to lift - pick the one in worse position
+        ball_to_lift = None
+        worst_score = float('inf')
+
+        for color in balls:
+            ball = self.balls[color]
+            if ball.has_pegged_out:
+                continue
+
+            # Score position - lower is worse
+            score = 0
+            target_hoop = self.court.get_hoop_for_ball(ball.hoops_run)
+            if target_hoop:
+                dist = (ball.position - target_hoop.position).magnitude()
+                score = -dist  # Further from hoop = worse
+
+            # Bonus for being on boundary (already in good lift position)
+            if ball.position.x < 2 or ball.position.x > self.court.width - 2:
+                score += 5  # Already near boundary, less need to lift
+            if ball.position.y < 2 or ball.position.y > self.court.height - 2:
+                score += 5
+
+            if score < worst_score:
+                worst_score = score
+                ball_to_lift = color
+
+        if ball_to_lift is None:
+            self.rules.clear_lift_entitlement()
+            return
+
+        # Choose baulk line - prefer the one further from opponents
+        opponent_balls = ["red", "yellow"] if side == "blue_black" else ["blue", "black"]
+        a_baulk_y = 1  # South
+        b_baulk_y = self.court.height - 1  # North
+
+        # Calculate average opponent Y position
+        opp_avg_y = sum(self.balls[c].position.y for c in opponent_balls
+                        if not self.balls[c].has_pegged_out) / 2
+
+        # Choose baulk line further from opponents
+        if abs(opp_avg_y - a_baulk_y) > abs(opp_avg_y - b_baulk_y):
+            baulk = "A"
+        else:
+            baulk = "B"
+
+        # Execute the lift
+        new_position = self.rules.use_lift(ball_to_lift, baulk, self.court)
+        self.balls[ball_to_lift].position = new_position
+        self._add_event(f"[LIFT] {ball_to_lift.capitalize()} lifted to {baulk}-baulk")
+
+    def _handle_wiring_lift(self, ball_color: str):
+        """
+        Handle wiring lift when a ball is wired from ALL other balls.
+
+        Under AC Laws, if a ball is wired from all other balls at the
+        start of its turn, it may be lifted to either baulk line.
+
+        This is different from the Advanced Play lift (1-back/4-back) -
+        it's a general fairness rule to prevent unfair wiring.
+
+        Args:
+            ball_color: Color of the ball that is wired
+        """
+        ball = self.balls[ball_color]
+
+        # Determine which side this ball is on
+        side = "blue_black" if ball_color in ["blue", "black"] else "red_yellow"
+
+        # Choose baulk line - prefer the one further from opponents
+        opponent_balls = ["red", "yellow"] if side == "blue_black" else ["blue", "black"]
+        a_baulk_y = 1  # South
+        b_baulk_y = self.court.height - 1  # North
+
+        # Calculate average opponent Y position
+        active_opps = [c for c in opponent_balls if not self.balls[c].has_pegged_out]
+        if active_opps:
+            opp_avg_y = sum(self.balls[c].position.y for c in active_opps) / len(active_opps)
+        else:
+            opp_avg_y = self.court.height / 2
+
+        # Choose baulk line further from opponents
+        if abs(opp_avg_y - a_baulk_y) > abs(opp_avg_y - b_baulk_y):
+            baulk = "A"
+            new_y = a_baulk_y
+        else:
+            baulk = "B"
+            new_y = b_baulk_y
+
+        # Place ball on chosen baulk line (center of baulk)
+        new_position = Vector2(self.court.width / 2, new_y)
+        ball.position = new_position
+        self._add_event(f"[WIRING LIFT] {ball_color.capitalize()} lifted to {baulk}-baulk")
+        print(f"  [WIRING LIFT] {ball_color} placed on {baulk}-baulk at {new_position}")
+
     def handle_events(self):
         """Handle Pygame events."""
         for event in pygame.event.get():
@@ -413,6 +544,8 @@ class CroquetSimulator:
         self.current_side = "blue_black"
         self.opening_complete = False
         self.current_ball_color_override = None
+        # Reset double-tap tracking
+        self.last_ball_played = {"blue_black": None, "red_yellow": None}
         self._add_event("Game restarted")
 
     def _add_event(self, text: str):
@@ -566,6 +699,13 @@ class CroquetSimulator:
         events = self.physics.update(self.balls, dt)
         self.shot_collisions.extend(events)
 
+        # Display hoop collision events immediately
+        for event in events:
+            if event.get('type') == 'hoop_hit':
+                self._add_event(f"{event['ball'].capitalize()} hit hoop {event['hoop']} upright!")
+            elif event.get('type') == 'jaws':
+                self._add_event(f"{event['ball'].capitalize()} stuck in jaws of hoop {event['hoop']}!")
+
         if self.physics.are_all_balls_stopped(self.balls):
             self.phase = GamePhase.TURN_END
 
@@ -654,6 +794,17 @@ class CroquetSimulator:
         for event in events:
             self._add_event(event)
 
+        # MARK IN: Place balls in yard line area onto the yard line
+        # Exception: striker's ball if they still have strokes remaining
+        striker_has_strokes = turn_continues
+        mark_in_events = self.physics.mark_in_all_balls(
+            self.balls,
+            striker_color=ball.color,
+            striker_has_strokes=striker_has_strokes
+        )
+        for mark_event in mark_in_events:
+            self._add_event(f"{mark_event['ball'].capitalize()} marked in to yard line")
+
         # Check for game over
         if self._check_game_over():
             self.phase = GamePhase.GAME_OVER
@@ -665,6 +816,10 @@ class CroquetSimulator:
             self.phase = GamePhase.THINKING
             self.think_start_time = time.time()
         else:
+            # Turn ended - record which ball played for double-tap tracking
+            ball_side = config.BALL_TEAMS[ball.color]
+            self.last_ball_played[ball_side] = ball.color
+
             # Next ball's turn
             self._next_turn()
 
@@ -693,9 +848,20 @@ class CroquetSimulator:
             else:
                 self.current_side = "blue_black"
 
+            # ADVANCED PLAY: Check for lift entitlement (from 1-back/4-back)
+            if self.rules.check_lift_available(self.current_side):
+                self._handle_lift_entitlement()
+
             # Side chooses which ball to play
             chosen_ball = self._select_ball_for_side(self.current_side)
             self.current_ball_color_override = chosen_ball
+
+            # WIRING LIFT: Check if chosen ball is wired from ALL other balls
+            # Under AC Laws, this grants a lift entitlement
+            chosen_ball_obj = self.balls[chosen_ball]
+            if self.rules.check_wiring_lift(chosen_ball_obj, self.balls, self.court):
+                self._add_event(f"[WIRING LIFT] {chosen_ball.capitalize()} is wired from all balls!")
+                self._handle_wiring_lift(chosen_ball)
 
         self._add_event(f"{self.current_ball_color.capitalize()}'s turn")
         self.rules.start_turn(self.current_ball_color)
@@ -780,8 +946,8 @@ class CroquetSimulator:
 
         self.renderer.render(self.court, self.balls, self.current_ball_color, turn_info)
 
-        if self.message_timer > 0 and self.message:
-            self.renderer.draw_message(self.message)
+        # Removed distracting black bar message overlay
+        # Messages are still logged to the event log at the bottom
 
         # Draw event log
         self._draw_event_log()

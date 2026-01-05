@@ -46,8 +46,8 @@ class Renderer:
         # Clear screen
         self.screen.fill(config.BLACK)
 
-        # Draw court
-        self.court_renderer.draw(court)
+        # Draw court (with hoop clips showing which ball needs each hoop)
+        self.court_renderer.draw(court, balls)
 
         # Draw balls
         self.ball_renderer.draw(balls, active_ball)

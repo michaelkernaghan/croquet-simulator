@@ -1,7 +1,8 @@
 """
 Break Strategy - Strategic planning for multi-hoop turns.
 
-Implements authentic croquet break-building concepts:
+Implements authentic croquet break-building concepts, refined based on
+Keith Aiton's teachings from "The Basics":
 
 2-Ball Break:
 - Only striker and one other ball (pilot/reception)
@@ -19,10 +20,13 @@ Implements authentic croquet break-building concepts:
 - By far the easiest break to play
 - Pivot eliminates difficult strokes and enables recovery
 
-Key concepts:
-- Hoop control: Running hoops to a specific spot for advantageous rush
-- Pioneer placement: Keep pioneers within inner rectangle of corner hoops
-- Rush direction: Position for rush toward next ball/hoop
+AITON KEY CONCEPTS (Sections 2.4-2.6):
+- "The general best way to transition to a 3-ball break is to a 4-ball break"
+- Pioneer: 3-4 yards in front of NEXT hoop (not current)
+- Reception ball quality determines approach quality
+- Pivot in center for flexibility and recovery
+- Hoop control: Run hoop to position for rush toward next ball
+- Inner rectangle (bounded by corner hoops) is ideal zone
 """
 import math
 from typing import Dict, List, Tuple, Optional
@@ -538,3 +542,172 @@ class BreakPlanner:
         import config
         friction = config.FRICTION_COEFFICIENT * config.GRAVITY
         return min(math.sqrt(2 * friction * dist) * 1.2, config.MAX_SHOT_POWER)
+
+    def plan_3_to_4_ball_transition(
+        self,
+        striker: Ball,
+        all_balls: Dict[str, Ball],
+        court: Court,
+        deadness: Dict[str, set]
+    ) -> Optional[Dict]:
+        """
+        Plan transition from 3-ball to 4-ball break.
+
+        AITON PRINCIPLE (Section 2.17-2.18):
+        "The general best way to transition to a 3-ball break is to a 4-ball break"
+
+        This involves:
+        1. Identifying the "loose" 4th ball (often in a corner or boundary)
+        2. Planning to collect it while maintaining break control
+        3. Positioning it as pivot or additional pioneer
+
+        Args:
+            striker: Ball playing the break
+            all_balls: All balls on court
+            court: The court
+            deadness: Which balls striker is dead on
+
+        Returns:
+            Dict with transition plan, or None if 4-ball already established
+        """
+        dead_on = deadness.get(striker.color, set())
+        available = [c for c in all_balls.keys()
+                    if c != striker.color and c not in dead_on]
+
+        # Already have 4-ball break potential
+        if len(available) >= 3:
+            return None
+
+        # Find the "loose" ball we're dead on but could collect after running hoop
+        dead_balls = [c for c in all_balls.keys()
+                     if c != striker.color and c in dead_on]
+
+        if not dead_balls:
+            return None
+
+        current_hoop = court.get_hoop_for_ball(striker.hoops_run)
+        if not current_hoop:
+            return None
+
+        # Find best ball to collect after running hoop (clears deadness)
+        best_collect = None
+        best_score = 0
+
+        for color in dead_balls:
+            ball = all_balls[color]
+            # Score based on position relative to break flow
+            score = self._score_collection_opportunity(
+                ball, striker, current_hoop, court
+            )
+            if score > best_score:
+                best_score = score
+                best_collect = color
+
+        if not best_collect or best_score < 0.3:
+            return None
+
+        collect_ball = all_balls[best_collect]
+
+        # Determine best role for collected ball
+        next_hoop = court.get_hoop_for_ball(striker.hoops_run + 1)
+        center = Vector2(court.width / 2, court.height / 2)
+
+        # Check if ball is better as pioneer or pivot
+        if next_hoop:
+            pioneer_dist = (collect_ball.position - next_hoop.position).magnitude()
+            pivot_dist = (collect_ball.position - center).magnitude()
+
+            if pioneer_dist < pivot_dist and pioneer_dist < 10:
+                target_role = "pioneer"
+                target_pos = next_hoop.position - next_hoop.direction * 4
+            else:
+                target_role = "pivot"
+                target_pos = center
+        else:
+            target_role = "pivot"
+            target_pos = center
+
+        return {
+            'collect_ball': best_collect,
+            'target_role': target_role,
+            'target_position': target_pos,
+            'collection_score': best_score,
+            'description': f"Collect {best_collect} as {target_role} to establish 4-ball break"
+        }
+
+    def _score_collection_opportunity(
+        self,
+        ball: Ball,
+        striker: Ball,
+        current_hoop,
+        court: Court
+    ) -> float:
+        """
+        Score how easy it is to collect a ball into the break.
+
+        AITON PRINCIPLE: Extracting balls from corners/boundaries
+        is a key skill for establishing 4-ball breaks.
+        """
+        # Distance from current action
+        dist_from_striker = (ball.position - striker.position).magnitude()
+        dist_from_hoop = (ball.position - current_hoop.position).magnitude()
+
+        # Balls too far away are hard to collect
+        if dist_from_striker > 25:
+            return 0.1
+
+        # Score based on accessibility
+        dist_score = max(0.2, 1.0 - dist_from_striker / 30)
+
+        # Bonus if ball is in inner rectangle (easier to incorporate)
+        if self._is_in_inner_rect(ball.position):
+            dist_score += 0.2
+
+        # Penalty if ball is in corner (harder to extract per Aiton)
+        corner_penalty = 0
+        corners = [
+            Vector2(3, 3), Vector2(3, court.height - 3),
+            Vector2(court.width - 3, 3), Vector2(court.width - 3, court.height - 3)
+        ]
+        for corner in corners:
+            if (ball.position - corner).magnitude() < 5:
+                corner_penalty = 0.15
+                break
+
+        # Check if ball is on boundary (yard line area)
+        boundary_penalty = 0
+        if (ball.position.x < 2 or ball.position.x > court.width - 2 or
+            ball.position.y < 2 or ball.position.y > court.height - 2):
+            boundary_penalty = 0.1
+
+        return max(0.1, dist_score - corner_penalty - boundary_penalty)
+
+    def suggest_hoop_exit_direction(
+        self,
+        current_hoop,
+        next_target: Vector2,
+        plan: BreakPlan
+    ) -> Vector2:
+        """
+        Suggest ideal exit direction after running hoop for rush setup.
+
+        AITON PRINCIPLE: Hoop control means running the hoop to a specific
+        point that allows a rush in an advantageous direction toward the
+        next ball or pioneer.
+
+        Args:
+            current_hoop: Hoop being run
+            next_target: Position of next ball to rush to
+            plan: Current break plan
+
+        Returns:
+            Ideal exit direction vector
+        """
+        hoop_exit = current_hoop.position + current_hoop.direction * 2
+
+        # Direction toward next target
+        to_target = next_target - hoop_exit
+        if to_target.magnitude() < 0.1:
+            return current_hoop.direction  # Default: continue through
+
+        return to_target.normalize()

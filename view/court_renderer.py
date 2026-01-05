@@ -3,9 +3,10 @@ Court renderer - draws the croquet court, hoops, and peg.
 """
 import pygame
 import math
-from typing import Tuple
+from typing import Tuple, Dict, Optional
 import config
 from models.court import Court, Hoop
+from models.ball import Ball
 
 
 class CourtRenderer:
@@ -26,18 +27,23 @@ class CourtRenderer:
         if self.font is None:
             self.font = pygame.font.Font(None, 20)
 
-    def draw(self, court: Court):
+    def draw(self, court: Court, balls: Optional[Dict[str, Ball]] = None):
         """
         Draw the complete court.
 
         Args:
             court: The court to draw
+            balls: Optional dictionary of balls (for drawing hoop clips)
         """
         self._draw_grass()
         self._draw_boundary_lines(court)
         self._draw_yard_lines(court)
         self._draw_hoops(court)
         self._draw_peg(court)
+
+        # Draw clips on hoops showing which ball needs to run each hoop
+        if balls:
+            self._draw_hoop_clips(court, balls)
 
     def _draw_grass(self):
         """Draw the grass background."""
@@ -191,5 +197,110 @@ class CourtRenderer:
             self.screen,
             config.BLACK,
             (px - radius // 2, py - radius, radius, radius * 2),
+            1
+        )
+
+    def _draw_hoop_clips(self, court: Court, balls: Dict[str, Ball]):
+        """
+        Draw colored clips on hoops showing which ball needs to run each hoop.
+
+        In AC, clips indicate which hoop each ball must run next:
+        - Hoops 1-6: Clip on TOP of the hoop crown
+        - Hoops 7-12 (1-back through rover): Clip on the SIDE of the hoop
+
+        Args:
+            court: The court with hoops
+            balls: Dictionary of balls to check next hoops
+        """
+        # First, group balls by their target hoop to handle multiple clips on same hoop
+        # Key: (physical_hoop_num, clip_on_top), Value: list of ball colors
+        hoop_clips = {}
+
+        for color, ball in balls.items():
+            if ball.has_pegged_out:
+                continue  # No clip for pegged out balls
+
+            hoops_run = ball.hoops_run
+            if hoops_run >= 12:
+                continue  # Rover - no more hoops, just peg
+
+            # Get the next hoop info
+            next_hoop_num = hoops_run + 1  # 1-indexed hoop number (1-12)
+
+            # Determine which physical hoop and clip position
+            if next_hoop_num <= 6:
+                # First circuit: physical hoop matches, clip on TOP
+                physical_hoop_num = next_hoop_num
+                clip_on_top = True
+            else:
+                # Second circuit: need to map to physical hoop, clip on SIDE
+                circuit_info = config.AC_SECOND_CIRCUIT.get(hoops_run)
+                if circuit_info:
+                    physical_hoop_num, _ = circuit_info
+                else:
+                    physical_hoop_num = None
+                clip_on_top = False
+
+            if physical_hoop_num:
+                key = (physical_hoop_num, clip_on_top)
+                if key not in hoop_clips:
+                    hoop_clips[key] = []
+                hoop_clips[key].append(color)
+
+        # Now draw clips with offsets for multiple balls on same hoop
+        for (physical_hoop_num, clip_on_top), colors in hoop_clips.items():
+            physical_hoop = court.get_hoop(physical_hoop_num)
+            if physical_hoop:
+                for idx, color in enumerate(colors):
+                    self._draw_clip(physical_hoop, color, clip_on_top, idx, len(colors))
+
+    def _draw_clip(self, hoop: Hoop, ball_color: str, on_top: bool, index: int = 0, total: int = 1):
+        """
+        Draw a colored clip on a hoop.
+
+        Args:
+            hoop: The hoop to draw the clip on
+            ball_color: Color of the ball (blue, red, black, yellow)
+            on_top: If True, draw on top bar; if False, draw on side
+            index: Index of this clip (for offsetting multiple clips)
+            total: Total number of clips on this hoop
+        """
+        px, py = hoop.get_pixel_position()
+        clip_color = config.BALL_COLORS.get(ball_color, config.WHITE)
+
+        # Clip dimensions
+        clip_width = 8
+        clip_height = 6
+
+        width = config.HOOP_WIDTH_PX
+        height = config.HOOP_HEIGHT_PX
+
+        if on_top:
+            # Clip on top of the crown (hoops 1-6)
+            # Spread multiple clips horizontally across the top bar
+            total_clips_width = total * clip_width + (total - 1) * 2  # 2px gap between clips
+            start_x = px - total_clips_width // 2
+            clip_x = start_x + index * (clip_width + 2)
+            clip_y = py - height // 2 - clip_height  # Above the crown
+        else:
+            # Clip on the side (hoops 7-12)
+            # Stack multiple clips vertically on the side
+            total_clips_height = total * clip_height + (total - 1) * 2  # 2px gap
+            start_y = py - total_clips_height // 2
+            clip_x = px - width // 2 - clip_width  # Left of left upright
+            clip_y = start_y + index * (clip_height + 2)
+
+        # Draw the clip as a small rectangle
+        pygame.draw.rect(
+            self.screen,
+            clip_color,
+            (clip_x, clip_y, clip_width, clip_height)
+        )
+
+        # Add a small outline for visibility
+        pygame.draw.rect(
+            self.screen,
+            config.BLACK,
+            (clip_x, clip_y, clip_width, clip_height),
             1
         )
