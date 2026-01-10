@@ -103,6 +103,20 @@ class NeuralTrainer:
         # Initialize DQN trainer
         self.dqn = DQNTrainer(self.config)
 
+        # Initialize opponent network for self-play (AlphaZero-style)
+        # When self_play_opponent="past", we maintain a separate network for the opponent
+        # that gets updated periodically from checkpoints
+        self.opponent_net = None
+        self.games_since_opponent_update = 0
+        if self.config.self_play and self.config.self_play_opponent == "past":
+            # Clone the current network as initial opponent
+            import copy
+            self.opponent_net = copy.deepcopy(self.dqn.online_net)
+            self.opponent_net.eval()  # Opponent always in eval mode
+            print("Self-play with PAST opponent enabled (periodic checkpoint updates)")
+        elif self.config.self_play:
+            print("Self-play with CURRENT network enabled (both sides use same network)")
+
         # Initialize tactical planner if enabled
         self.planner = None
         if use_planner:
@@ -209,6 +223,17 @@ class NeuralTrainer:
             result = self._run_episode()
             self.episode_results.append(result)
 
+            # Update opponent network periodically (self-play with past checkpoint)
+            if self.config.self_play and self.opponent_net is not None:
+                self.games_since_opponent_update += 1
+                if self.games_since_opponent_update >= self.config.opponent_update_freq:
+                    import copy
+                    self.opponent_net = copy.deepcopy(self.dqn.online_net)
+                    self.opponent_net.eval()
+                    self.games_since_opponent_update = 0
+                    if self.verbose:
+                        print(f"  [SELF-PLAY] Updated opponent network at episode {episode}")
+
             # Print progress
             if episode % 10 == 0 or episode == 1:
                 epsilon = self.dqn.get_epsilon()
@@ -228,6 +253,11 @@ class NeuralTrainer:
                           " | ".join(f"{k}:{v:.1f}%" for k, v in sorted(intent_dist.items())))
                 if masking['avg_valid_actions'] > 0:
                     print(f"  Avg valid actions: {masking['avg_valid_actions']:.1f}")
+
+                # Log shaping weight if annealing is enabled
+                shaping_weight = self.dqn.get_shaping_weight()
+                if self.dqn.config.shaping_anneal:
+                    print(f"  Shaping weight: {shaping_weight:.3f} (annealing toward sparse rewards)")
 
                 # Log target mask effectiveness (should decrease as network learns legality)
                 mask_stats = self.dqn.get_mask_stats()
@@ -390,10 +420,15 @@ class NeuralTrainer:
                     if self.verbose:
                         print(f"  OPENING: {ball.color} placed at {ball.position}")
                 else:
+                    # Determine if this is opponent's turn (for self-play)
+                    # Blue/Black = main player, Red/Yellow = opponent
+                    is_opponent_turn = current_color in ["red", "yellow"]
+
                     # Neural network decision
                     episode_reward, step_hoop_run = self._neural_step(
                         ball, active_balls, rules, physics, training=training,
-                        tactical_kpis=tactical_kpis
+                        tactical_kpis=tactical_kpis,
+                        is_opponent=is_opponent_turn
                     )
                     total_reward += episode_reward
                     if step_hoop_run:
@@ -476,7 +511,8 @@ class NeuralTrainer:
         rules: RuleEngine,
         physics: PhysicsEngine,
         training: bool = True,
-        tactical_kpis: dict = None
+        tactical_kpis: dict = None,
+        is_opponent: bool = False
     ) -> float:
         """
         Execute one neural network step.
@@ -485,6 +521,9 @@ class NeuralTrainer:
             training: If True, use epsilon-greedy and update network.
                      If False, use pure greedy and skip learning.
             tactical_kpis: If provided (during eval), accumulate tactical KPI stats.
+            is_opponent: If True, this is the opponent's turn in self-play mode.
+                        Uses opponent network (if available) and optionally trains
+                        with flipped reward perspective.
 
         Returns reward for this step.
         """
@@ -501,8 +540,16 @@ class NeuralTrainer:
         dm = TacticalDecisionMaker()
         valid_actions = dm._get_valid_neural_actions(ball, balls, self.court, deadness)
 
-        # Select action (epsilon-greedy if training, pure greedy if evaluating)
-        action, q_value = self.dqn.select_action(state, valid_actions, training=training)
+        # Select action based on which side is playing (self-play support)
+        if is_opponent and self.opponent_net is not None:
+            # Use opponent network (past checkpoint) for action selection
+            # Opponent always plays greedily (no exploration)
+            action, q_value = self.opponent_net.get_action(
+                state.to(self.dqn.device), epsilon=0.0, valid_actions=valid_actions
+            )
+        else:
+            # Use main network (epsilon-greedy if training, pure greedy if evaluating)
+            action, q_value = self.dqn.select_action(state, valid_actions, training=training)
 
         # LLM Planner advisor (only during evaluation, not training)
         planner_output = None
@@ -708,8 +755,14 @@ class NeuralTrainer:
         # Update running total for this turn
         self.turn_tactical_reward_total += tactical_reward
 
-        # Final reward = base (never capped) + tactical (capped by budget)
-        reward = base_reward + tactical_reward
+        # Apply shaping weight for AlphaZero-style annealing
+        # This gradually reduces tactical shaping influence over training,
+        # shifting from expert-guided learning toward sparse (outcome-based) learning
+        shaping_weight = self.dqn.get_shaping_weight()
+        weighted_tactical_reward = tactical_reward * shaping_weight
+
+        # Final reward = base (never capped) + weighted tactical (capped by budget, then annealed)
+        reward = base_reward + weighted_tactical_reward
 
         # Update once-per-turn caps based on what was awarded this step
         for key, was_awarded in tactical_awards.items():
@@ -774,14 +827,30 @@ class NeuralTrainer:
 
             # Only mark done=True at actual game end
             done = game_over
-            # Store next_valid_actions in info dict for target masking
-            self.dqn.store_transition(
-                state, action, reward, next_state, done,
-                info={'next_valid_actions': next_valid_actions}
-            )
 
-            # Train
-            self.dqn.train_step()
+            # SELF-PLAY TRAINING (AlphaZero-style)
+            # Determine whether to store this transition based on self-play settings
+            should_store = True
+            training_reward = reward
+
+            if is_opponent:
+                if self.config.self_play and self.config.train_both_sides:
+                    # Train on opponent's transitions with flipped reward perspective
+                    # From opponent's view, good for us = bad for them
+                    training_reward = -reward
+                else:
+                    # Don't store opponent transitions if not training both sides
+                    should_store = False
+
+            if should_store:
+                # Store next_valid_actions in info dict for target masking
+                self.dqn.store_transition(
+                    state, action, training_reward, next_state, done,
+                    info={'next_valid_actions': next_valid_actions}
+                )
+
+                # Train
+                self.dqn.train_step()
 
         return reward, hoop_run
 
@@ -833,7 +902,7 @@ class NeuralTrainer:
                 )
                 # Rush availability: can we rush a ball to the next hoop?
                 context['has_rush_to_hoop'] = self._has_rush_to_position(
-                    ball, balls, next_hoop.position, max_cut_angle=30.0
+                    ball, balls, next_hoop.position, max_cut_angle=45.0
                 )
             else:
                 context['has_pioneer_at_next'] = False
@@ -1029,14 +1098,15 @@ class NeuralTrainer:
         return False
 
     def _has_rush_to_position(self, striker: Ball, balls: Dict[str, Ball],
-                              target_position: Vector2, max_cut_angle: float = 30.0) -> bool:
+                              target_position: Vector2, max_cut_angle: float = 45.0) -> bool:
         """
         Check if striker has a rush (two balls together) toward a target position.
 
         A good rush requires:
         1. A ball within 3 yards of striker
         2. Alignment such that hitting it sends it toward target
-        3. Cut angle < max_cut_angle degrees (straight rush is best)
+        3. Cut angle < max_cut_angle degrees (relaxed from 30° to 45° for better detection)
+        4. Rush actually moves ball closer to target (usefulness check)
 
         Returns True if a usable rush exists.
         """
@@ -1056,7 +1126,8 @@ class NeuralTrainer:
 
             # Calculate target direction (rush ball -> target)
             target_dir = (target_position - ball.position)
-            if target_dir.magnitude() < 0.1:
+            target_dist_before = target_dir.magnitude()
+            if target_dist_before < 0.1:
                 continue  # Already at target
             target_dir = target_dir.normalize()
 
@@ -1066,9 +1137,17 @@ class NeuralTrainer:
             angle_rad = math.acos(dot)
             angle_deg = math.degrees(angle_rad)
 
-            # Good rush if cut angle is small
+            # Good rush if cut angle is reasonable AND moves ball toward target
             if angle_deg < max_cut_angle:
-                return True
+                # Usefulness check: ensure rush would move ball closer to target
+                # Estimate rushed ball position (simplified: ~1.5x the striker-ball distance)
+                estimated_rush_dist = dist * 1.5
+                rush_end_pos = ball.position + rush_dir * estimated_rush_dist
+                target_dist_after = (target_position - rush_end_pos).magnitude()
+
+                # Only count if rush moves ball closer to target
+                if target_dist_after < target_dist_before:
+                    return True
 
         return False
 
@@ -1622,6 +1701,54 @@ def main():
         action="store_true",
         help="Enable LLM tactical planner as advisor during evaluation (requires ANTHROPIC_API_KEY)"
     )
+    # AlphaZero-style reward shaping annealing
+    parser.add_argument(
+        "--anneal-shaping",
+        action="store_true",
+        help="Enable AlphaZero-style reward shaping annealing (gradually reduce tactical shaping)"
+    )
+    parser.add_argument(
+        "--shaping-start",
+        type=float,
+        default=1.0,
+        help="Initial shaping weight (default: 1.0 = full expert guidance)"
+    )
+    parser.add_argument(
+        "--shaping-end",
+        type=float,
+        default=0.1,
+        help="Final shaping weight (default: 0.1 = mostly sparse rewards)"
+    )
+    parser.add_argument(
+        "--shaping-anneal-steps",
+        type=int,
+        default=500000,
+        help="Steps over which to anneal shaping (default: 500000)"
+    )
+    # AlphaZero-style self-play training
+    parser.add_argument(
+        "--self-play",
+        action="store_true",
+        help="Enable self-play training (both sides use neural network)"
+    )
+    parser.add_argument(
+        "--self-play-opponent",
+        type=str,
+        default="current",
+        choices=["current", "past"],
+        help="Opponent type: 'current' = same network, 'past' = periodic checkpoint (default: current)"
+    )
+    parser.add_argument(
+        "--opponent-update-freq",
+        type=int,
+        default=100,
+        help="Games between opponent checkpoint updates when using 'past' (default: 100)"
+    )
+    parser.add_argument(
+        "--no-train-both-sides",
+        action="store_true",
+        help="Only train on main player (blue/black) transitions, not opponent"
+    )
 
     args = parser.parse_args()
 
@@ -1652,6 +1779,22 @@ def main():
         print("  - Oxford Croquet Rules of Thumb")
         print("  - Defensive play principles")
         print("  - 4-ball break building rewards")
+
+    # Show AlphaZero-style annealing settings
+    if args.anneal_shaping:
+        print(f"ALPHAZERO-STYLE REWARD ANNEALING enabled:")
+        print(f"  - Shaping weight: {args.shaping_start:.1f} -> {args.shaping_end:.1f}")
+        print(f"  - Anneal over: {args.shaping_anneal_steps:,} steps")
+        print(f"  - Sparse rewards will dominate by step ~{int(args.shaping_anneal_steps * 0.8):,}")
+
+    # Show self-play settings
+    if args.self_play:
+        print(f"ALPHAZERO-STYLE SELF-PLAY enabled:")
+        print(f"  - Opponent: {args.self_play_opponent}")
+        if args.self_play_opponent == "past":
+            print(f"  - Opponent update frequency: every {args.opponent_update_freq} games")
+        train_both = not args.no_train_both_sides
+        print(f"  - Train both sides: {train_both}")
     print()
 
     # Enable demo mixing if pretrain with demos is specified
@@ -1668,6 +1811,16 @@ def main():
         min_buffer_size=args.min_buffer,
         use_demo_mixing=use_demo_mixing,
         demo_fraction=args.demo_frac,
+        # AlphaZero-style reward shaping annealing
+        shaping_anneal=args.anneal_shaping,
+        shaping_start=args.shaping_start,
+        shaping_end=args.shaping_end,
+        shaping_anneal_steps=args.shaping_anneal_steps,
+        # AlphaZero-style self-play training
+        self_play=args.self_play,
+        self_play_opponent=args.self_play_opponent,
+        opponent_update_freq=args.opponent_update_freq,
+        train_both_sides=not args.no_train_both_sides,
     )
 
     # Create trainer

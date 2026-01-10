@@ -567,6 +567,246 @@ class DuelingCroquetNet(nn.Module):
         return model
 
 
+class PolicyValueNet(nn.Module):
+    """
+    AlphaZero-style network with separate policy and value heads.
+
+    Unlike DuelingCroquetNet which outputs Q(s,a) values, this outputs:
+    - Policy head: π(a|s) - probability distribution over actions
+    - Value head: V(s) - expected game outcome from current player's perspective
+
+    This architecture is designed for:
+    - MCTS: Policy provides prior probabilities for tree search
+    - Self-play: Value estimates position quality without full rollout
+    - Policy gradient: Direct optimization of action probabilities
+
+    The network shares feature extraction layers, then branches into
+    separate policy and value streams (similar to AlphaGo Zero).
+    """
+
+    NUM_ACTIONS = 8  # Same action space as DQN
+
+    def __init__(
+        self,
+        state_size: int = None,
+        hidden_sizes: List[int] = None,
+        dropout: float = 0.2
+    ):
+        """
+        Initialize PolicyValueNet.
+
+        Args:
+            state_size: Input state dimension (default: StateEncoder.STATE_SIZE)
+            hidden_sizes: Sizes of shared hidden layers (default: [256, 128])
+            dropout: Dropout rate for regularization
+        """
+        super(PolicyValueNet, self).__init__()
+
+        if state_size is None:
+            state_size = StateEncoder.STATE_SIZE
+        if hidden_sizes is None:
+            hidden_sizes = [256, 128]
+
+        self.state_size = state_size
+        self.hidden_sizes = hidden_sizes
+
+        # Shared feature extraction layers (backbone)
+        shared_layers = []
+        prev_size = state_size
+        for i, hidden_size in enumerate(hidden_sizes):
+            shared_layers.append(nn.Linear(prev_size, hidden_size))
+            shared_layers.append(nn.ReLU())
+            if i < len(hidden_sizes) - 1:
+                shared_layers.append(nn.Dropout(dropout))
+            prev_size = hidden_size
+        self.shared_layers = nn.Sequential(*shared_layers)
+
+        # Policy head: outputs logits for action probabilities
+        # Architecture: shared_output -> 64 -> NUM_ACTIONS
+        self.policy_head = nn.Sequential(
+            nn.Linear(prev_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.NUM_ACTIONS)
+            # Note: no softmax here - applied with masking during inference
+        )
+
+        # Value head: outputs scalar value in [-1, 1]
+        # Architecture: shared_output -> 64 -> 1 -> tanh
+        self.value_head = nn.Sequential(
+            nn.Linear(prev_size, 64),
+            nn.ReLU(),
+            nn.Linear(64, 1),
+            nn.Tanh()  # Bound output to [-1, 1] for game outcome
+        )
+
+        self._init_weights()
+
+    def _init_weights(self):
+        """Initialize weights using Xavier/Glorot initialization."""
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+    def forward(self, state: 'torch.Tensor') -> Tuple['torch.Tensor', 'torch.Tensor']:
+        """
+        Forward pass returning both policy logits and value.
+
+        Args:
+            state: Input state tensor of shape (batch, state_size) or (state_size,)
+
+        Returns:
+            Tuple of:
+            - policy_logits: [batch, NUM_ACTIONS] raw logits (apply softmax with mask)
+            - value: [batch, 1] expected outcome in [-1, 1]
+        """
+        # Handle single state input
+        if state.dim() == 1:
+            state = state.unsqueeze(0)
+
+        # Shared feature extraction
+        features = self.shared_layers(state)
+
+        # Separate heads
+        policy_logits = self.policy_head(features)
+        value = self.value_head(features)
+
+        return policy_logits, value
+
+    def get_policy(
+        self,
+        state: 'torch.Tensor',
+        valid_actions: List[int] = None,
+        temperature: float = 1.0
+    ) -> 'torch.Tensor':
+        """
+        Get masked softmax policy distribution.
+
+        Args:
+            state: Input state tensor
+            valid_actions: List of valid action indices (None = all valid)
+            temperature: Softmax temperature (higher = more exploration)
+
+        Returns:
+            Policy tensor of shape [NUM_ACTIONS] with probabilities
+        """
+        policy_logits, _ = self.forward(state)
+
+        # Apply temperature scaling
+        if temperature != 1.0:
+            policy_logits = policy_logits / temperature
+
+        # Mask invalid actions with -inf
+        if valid_actions is not None:
+            mask = torch.full_like(policy_logits, float('-inf'))
+            for a in valid_actions:
+                mask[0, a] = 0
+            policy_logits = policy_logits + mask
+
+        # Softmax to get probabilities
+        policy = F.softmax(policy_logits, dim=-1)
+
+        return policy.squeeze(0)
+
+    def get_value(self, state: 'torch.Tensor') -> float:
+        """
+        Get state value prediction.
+
+        Args:
+            state: Input state tensor
+
+        Returns:
+            Scalar value in [-1, 1] representing expected game outcome
+        """
+        _, value = self.forward(state)
+        return value.item()
+
+    def get_policy_and_value(
+        self,
+        state: 'torch.Tensor',
+        valid_actions: List[int] = None,
+        temperature: float = 1.0
+    ) -> Tuple['torch.Tensor', float]:
+        """
+        Get both policy and value in one forward pass (efficient for MCTS).
+
+        Args:
+            state: Input state tensor
+            valid_actions: List of valid action indices
+            temperature: Softmax temperature
+
+        Returns:
+            Tuple of (policy_tensor, value_float)
+        """
+        policy_logits, value = self.forward(state)
+
+        # Apply temperature
+        if temperature != 1.0:
+            policy_logits = policy_logits / temperature
+
+        # Mask invalid actions
+        if valid_actions is not None:
+            mask = torch.full_like(policy_logits, float('-inf'))
+            for a in valid_actions:
+                mask[0, a] = 0
+            policy_logits = policy_logits + mask
+
+        policy = F.softmax(policy_logits, dim=-1).squeeze(0)
+
+        return policy, value.item()
+
+    def select_action(
+        self,
+        state: 'torch.Tensor',
+        valid_actions: List[int] = None,
+        temperature: float = 1.0,
+        greedy: bool = False
+    ) -> Tuple[int, float]:
+        """
+        Select action from policy distribution.
+
+        Args:
+            state: Input state tensor
+            valid_actions: List of valid action indices
+            temperature: Softmax temperature (ignored if greedy=True)
+            greedy: If True, select highest probability action
+
+        Returns:
+            Tuple of (action_index, action_probability)
+        """
+        with torch.no_grad():
+            policy = self.get_policy(state, valid_actions, temperature)
+
+            if greedy:
+                action = policy.argmax().item()
+            else:
+                # Sample from distribution
+                action = torch.multinomial(policy, 1).item()
+
+            return action, policy[action].item()
+
+    def save(self, path: str):
+        """Save model weights to file."""
+        torch.save({
+            'state_dict': self.state_dict(),
+            'state_size': self.state_size,
+            'hidden_sizes': self.hidden_sizes,
+            'architecture': 'policy_value',  # Mark architecture type
+        }, path)
+
+    @classmethod
+    def load(cls, path: str) -> 'PolicyValueNet':
+        """Load model from file."""
+        checkpoint = torch.load(path, map_location='cpu')
+        model = cls(
+            state_size=checkpoint['state_size'],
+            hidden_sizes=checkpoint['hidden_sizes']
+        )
+        model.load_state_dict(checkpoint['state_dict'])
+        return model
+
+
 def check_torch_available() -> bool:
     """Check if PyTorch is available."""
     return TORCH_AVAILABLE

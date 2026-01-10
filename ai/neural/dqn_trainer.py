@@ -79,6 +79,21 @@ class TrainingConfig:
     checkpoint_freq: int = 1000  # Steps between checkpoints
     save_dir: str = "ai_data/neural"
 
+    # Reward shaping annealing (AlphaZero-style transition to sparse rewards)
+    # When enabled, tactical shaping weight decays over training, shifting
+    # from expert-guided learning toward pure outcome-based learning
+    shaping_anneal: bool = False          # Enable annealing
+    shaping_start: float = 1.0            # Initial shaping weight (full expert guidance)
+    shaping_end: float = 0.1              # Final shaping weight (mostly sparse)
+    shaping_anneal_steps: int = 500000    # Steps to anneal over
+
+    # Self-play training (AlphaZero-style)
+    # When enabled, both sides use the neural network instead of one side using heuristic
+    self_play: bool = False               # Enable self-play mode
+    self_play_opponent: str = "current"   # "current" = same network, "past" = past checkpoint
+    opponent_update_freq: int = 100       # Games between opponent checkpoint updates (if "past")
+    train_both_sides: bool = True         # Train on transitions from both sides (not just blue/black)
+
     def __post_init__(self):
         if self.hidden_sizes is None:
             self.hidden_sizes = [256, 128, 64]
@@ -300,6 +315,26 @@ class DQNTrainer:
             self.config.epsilon_end - self.config.epsilon_start
         )
         return epsilon
+
+    def get_shaping_weight(self) -> float:
+        """
+        Get current reward shaping weight (AlphaZero-style annealing).
+
+        When shaping_anneal is enabled, this decays from shaping_start to
+        shaping_end over shaping_anneal_steps, allowing gradual transition
+        from expert-guided rewards to sparse (outcome-based) rewards.
+
+        Returns:
+            Weight to multiply tactical shaping rewards by (0.0 to 1.0)
+        """
+        if not self.config.shaping_anneal:
+            return 1.0  # No annealing - full shaping weight
+
+        progress = min(1.0, self.stats.total_steps / self.config.shaping_anneal_steps)
+        weight = self.config.shaping_start + progress * (
+            self.config.shaping_end - self.config.shaping_start
+        )
+        return weight
 
     def select_action(
         self,
