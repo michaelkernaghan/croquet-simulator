@@ -1,35 +1,48 @@
 # Association Croquet Simulator with Neural AI
 
-A physics-based Association Croquet simulator featuring a Deep Q-Network (DQN) AI that learns break-building tactics through reinforcement learning.
+A physics-based Association Croquet simulator featuring a Deep Q-Network (DQN) AI that learns break-building tactics through reinforcement learning, trained on 2025 World Championship match data.
+
+## Academic Paper
+
+**[Read the Paper (PDF)](docs/paper/croquet_ai_paper.pdf)**
+
+This research explores applying deep reinforcement learning to Association Croquet, encoding expert tactical knowledge from Aiton, Wylie, and Oxford Croquet into a reward function that teaches authentic 4-ball break play.
 
 ## Overview
 
 This project implements:
 - **Full Association Croquet rules** - 12-hoop course, deadness, continuation strokes, peg-out
 - **Physics simulation** - Ball collisions, croquet strokes, hoop running, boundary handling
-- **DQN-based AI** - Neural network learns tactical play through self-play
-- **Expert tactical shaping** - Reward function encodes croquet principles from Aiton, Wylie, and Oxford Croquet
+- **Dueling DQN AI** - Neural network learns tactical play through self-play
+- **Expert-informed reward shaping** - Tactical principles encoded from championship-level coaching
 
-## Current Training Status
+## Quick Start
 
-**Episode 1100+ | ~2.9M steps**
+```bash
+# Run with visualization
+python main.py
 
-### Performance Metrics
-- **Greedy Hoops**: 20-21 per game (out of 24 possible per side)
-- **Win Rate**: 70%
-- **Epsilon**: 0.05 (mostly greedy, 5% exploration)
+# Train from checkpoint
+python train_neural.py 5000 --checkpoint ai_data/neural/checkpoint.pt
 
-### Tactical KPIs
-- Pilot ball at current hoop: 28%
-- Pioneer at next hoop: 35%
-- Rush available: 3%
-- Cluster quality: 0.42
-- Break balls in position: 2.7
+# Fresh training run
+python train_neural.py 5000
 
-### Budget Tracking
-- Average tactical budget used: 2.29/turn
-- Turns hitting bonus cap (+3): 39%
-- Turns hitting penalty cap (-2): 0%
+# Monitor training for plateau/collapse
+python plateau_detector.py --watch
+```
+
+## Training Status
+
+**Latest checkpoint**: `ai_data/neural/checkpoint_ep1500.pt`
+
+| Metric | Value |
+|--------|-------|
+| Greedy Hoops | 20-21 per game |
+| Win Rate | 70% |
+| Epsilon | 0.05 |
+| Pioneer at next hoop | 35% |
+| Rush available | 3% |
 
 ## Architecture
 
@@ -39,96 +52,91 @@ This project implements:
 - Action space: HOOP_RUN, ROQUET_*, APPROACH, DEFENSIVE, PEG_OUT
 - Prioritized experience replay with n-step returns
 
-### Reward Function Design
+### Reward Design
 
-The reward function separates **base rewards** (never capped) from **tactical shaping** (budget-capped):
+The reward function separates **base rewards** (uncapped) from **tactical shaping** (budget-capped at +3/-2 per turn):
 
-**Base Rewards:**
-- Hoop run: +10 (with sublinear streak bonus)
-- Peg out: +20
-- Roquet: +0.5 to +1.5 (context-dependent)
-- Miss: -1.5
-- Rover dawdling: escalating penalty
+| Category | Reward | Notes |
+|----------|--------|-------|
+| Hoop run | +10 | Sublinear streak bonus |
+| Peg out | +20 | Game completion |
+| Roquet | +0.5 to +1.5 | Context-dependent |
+| Miss | -1.5 | Penalty |
+| Pioneer creation | +1.5 | Once per turn |
+| Rush creation | +1.2 | Once per turn |
+| Pilot creation | +1.0 | Once per turn |
 
-**Tactical Shaping (capped at +3/-2 per turn):**
-- Delta-based rewards for CREATING positions (not maintaining)
-- Pilot creation: +1.0 (once per turn)
-- Pioneer creation: +1.5 (once per turn)
-- Rush creation: +1.2 (once per turn)
-- Cluster improvement: continuous
-- Opponent separation: phase-gated
-
-**Safety Features:**
-- Per-turn shaping budget prevents reward farming
-- Hysteresis on thresholds prevents flip-flopping
-- Loss penalty caps prevent over-punishment during repositioning
-- Once-per-turn caps on binary features
-
-## Key Files
+## Project Structure
 
 ```
-train_neural.py          # Main DQN training loop
-ai/neural/
-  dqn_trainer.py         # DQN implementation with reward function
-  croquet_net.py         # Neural network architecture
-  replay_buffer.py       # Experience replay implementations
-  state_encoder.py       # State representation
-ai/
-  ai_controller.py       # AI decision making
-  break_strategy.py      # Break-building logic
-  tactical_planner.py    # LLM-assisted planning (optional)
-physics/
-  physics_engine.py      # Ball physics simulation
-  croquet_strokes.py     # Stroke mechanics
-rules/
-  rule_engine.py         # Association Croquet rules
-models/
-  ball.py, court.py      # Game state models
+croquet-simulator/
+├── main.py                 # Game visualization
+├── train_neural.py         # DQN training loop
+├── train_alphazero.py      # AlphaZero variant
+├── config.py               # Training configuration
+├── plateau_detector.py     # Training monitor
+│
+├── ai/                     # AI components
+│   ├── neural/             # DQN implementation
+│   ├── ai_controller.py    # Decision making
+│   └── break_strategy.py   # Break-building logic
+│
+├── models/                 # Game state (Ball, Court)
+├── physics/                # Physics engine
+├── rules/                  # Association Croquet rules
+│
+├── ai_data/
+│   └── neural/             # Saved checkpoints
+│
+├── docs/
+│   ├── paper/              # Academic paper (LaTeX + PDF)
+│   └── ablation_experiments.md
+│
+├── transcripts/            # 2025 World Championship data
+│   └── parsed/             # Extracted training examples
+│
+└── reference_docs/         # Coaching materials
 ```
 
-## Running Training
+## Training Data
 
-```bash
-# Continue from checkpoint
-python train_neural.py --checkpoint ai_data/neural/checkpoint_final.pt --episodes 5000
+Training data extracted from:
+- 2025 World Championship match transcripts (VTT format)
+- CroquetScores.com game records
+- Keith Aiton coaching transcripts
 
-# Fresh start
-python train_neural.py --episodes 5000
+See `docs/aiton_transcript_mapping.md` for reward shaping derivation.
 
-# With LLM tactical planner
-python train_neural.py --checkpoint ai_data/neural/checkpoint_final.pt --use-planner
-```
+## Documentation
 
-## Future Plans
+- **[TRAINING_NOTES.md](TRAINING_NOTES.md)** - Stability fixes, hyperparameters, troubleshooting
+- **[SPEC.md](SPEC.md)** - Full technical specification
+- **[SESSION_STATUS.md](SESSION_STATUS.md)** - Current development status
+- **[docs/ablation_experiments.md](docs/ablation_experiments.md)** - Planned experiments
+
+## Roadmap
+
+### In Progress
+- [ ] Ablation experiments for paper validation
+- [ ] Baseline agent comparisons (Random, Heuristic, Greedy)
 
 ### Short-term
-- [ ] Improve rush detection (currently only 3% of positions)
-- [ ] Add directional pioneer/pilot detection (approach angle, not just distance)
-- [ ] Monitor budget cap calibration as training continues
+- [ ] Improve rush detection (currently 3%)
+- [ ] Directional pioneer/pilot detection
 
 ### Medium-term
-- [ ] Behavior cloning pretraining from expert demonstrations
-- [ ] Leave quality detection and rewards (NSL, OSL patterns)
+- [ ] Behavior cloning from expert demonstrations
+- [ ] Leave quality detection (NSL, OSL patterns)
 - [ ] Wiring detection for defensive play
 
 ### Long-term
 - [ ] Self-play curriculum with opponent modeling
 - [ ] Transfer learning to different court sizes
-- [ ] Integration with physical croquet robot
+- [ ] Physical croquet robot integration
 
 ## References
 
 - Keith Aiton's break-building principles
 - Wylie's "Expert Croquet Tactics"
 - Oxford Croquet "Rules of Thumb"
-- MacRobertson Shield tournament analysis
-
-## Training Notes
-
-See `TRAINING_NOTES.md` for detailed session logs and observations.
-
-Key learnings:
-1. Delta-based rewards prevent position farming
-2. Per-turn budget caps keep hoop rewards dominant
-3. Hysteresis prevents threshold flip-flopping
-4. Phase-gating prevents conflicting objectives
+- 2025 World Championship match analysis

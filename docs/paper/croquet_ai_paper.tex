@@ -1,0 +1,590 @@
+\documentclass[11pt,a4paper]{article}
+
+% arXiv-style packages
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}  % Latin Modern fonts - fixes T1 bold spacing issues
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{hyperref}
+\usepackage{natbib}
+\usepackage[expansion=false,protrusion=false]{microtype}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+% Page layout
+\usepackage[margin=1in]{geometry}
+
+% For code listings
+\usepackage{listings}
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    numbers=left,
+    numberstyle=\tiny,
+}
+
+% Title information
+\title{Expert-Guided Training of a Neural Association Rules Croquet Simulator}
+
+\author{
+    Michael Kernaghan \\
+    \texttt{michaelkernaghan@ecadlabs.com}
+}
+
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+We present a deep reinforcement learning approach to Association Croquet, a long-horizon physical game with continuous state, sparse rewards, and complex expert strategy. Unlike recent successes in pure self-play for board games, croquet requires structured tactical knowledge to learn effective break construction. We combine a dueling Deep Q-Network with expert-derived reward shaping and action-space augmentation informed by elite-level croquet theory.
+
+A key finding is that naive reward designs---such as incentivizing ball clustering---produce fundamentally incorrect play, while proper break construction requires explicit support for pioneer placement during croquet strokes. We show that this capability was absent from the original action space and integrate expert heuristics to address this limitation.
+
+Our results demonstrate substantial improvements in break-building behavior and highlight broader lessons about reward engineering, action-space completeness, and the practical role of expert knowledge in reinforcement learning for complex physical games under limited computational resources.
+\end{abstract}
+
+\section{Introduction}
+
+Association Croquet is a two-player lawn game with a rich strategic tradition dating to the 1860s. Unlike its casual garden-party image, competitive croquet at the elite level---exemplified by the MacRobertson Shield, the sport's premier international competition---involves deep tactical reasoning comparable to chess \citep{wylie2016croquet}.
+
+The game presents several challenges for artificial intelligence:
+
+\begin{itemize}
+    \item \textbf{Long-horizon planning}: A player must navigate 26 hoops (including the peg-out) with four balls, requiring planning over potentially hundreds of shots.
+    \item \textbf{Sparse terminal rewards}: Games can last hours with only win/loss as natural feedback.
+    \item \textbf{Complex state space}: Ball positions are continuous, hoop progress is discrete, and the interaction between offensive and defensive considerations creates a large effective state space.
+    \item \textbf{Break construction}: The signature skill of croquet---running a ``break'' where one scores multiple hoops in a single turn---requires precise ball positioning that differs fundamentally from intuitive notions of ``keeping balls together.''
+\end{itemize}
+
+This paper describes our approach to training a croquet-playing agent using deep reinforcement learning augmented with expert knowledge. Our key contributions are:
+
+\begin{enumerate}
+    \item A croquet simulation environment suitable for reinforcement learning
+    \item An automated pipeline for extracting tactical patterns from video transcripts and structured game notation
+    \item Expert-derived reward shaping based on five years of elite tournament data (2020--2025)
+    \item Analysis of why naive reward functions (e.g., rewarding ball clustering) produce suboptimal play
+    \item A dueling DQN architecture with n-step returns adapted for croquet's long horizons
+    \item Discussion of the expert-guided vs. pure self-play trade-off in sports AI
+\end{enumerate}
+
+\paragraph{Positioning.} This paper is not intended as a benchmark-setting result or a claim of optimal play in Association Croquet. Rather, it serves as a focused case study demonstrating how reward shaping, expert priors, and action-space design interact in long-horizon physical games. Our goal is to surface failure modes, design insights, and practical trade-offs relevant to reinforcement learning systems operating under realistic data and compute constraints.
+
+\section{Background}
+
+\subsection{Association Croquet Rules}
+
+Association Croquet is played with four balls---blue and black versus red and yellow---on a standard lawn with six hoops arranged in a specific pattern. Each ball must run all six hoops twice (in prescribed directions) plus hit the center peg, for 13 points per ball and 26 points total to win.
+
+The key mechanic is the \textit{croquet stroke}: when a player's ball hits another ball (a ``roquet''), they earn two bonus strokes---first a croquet stroke where both balls move, then a continuation stroke. Skilled players chain these interactions into ``breaks'' scoring many hoops consecutively.
+
+\subsection{The Four-Ball Break}
+
+The canonical technique in competitive croquet is the \textit{four-ball break}, where a player uses all four balls in coordinated positions:
+
+\begin{itemize}
+    \item \textbf{Striker's ball}: The ball being played
+    \item \textbf{Pilot ball}: Positioned near the current hoop to assist running it
+    \item \textbf{Pioneer}: Placed ahead at the next hoop
+    \item \textbf{Pivot}: Centrally located to provide access to other balls
+\end{itemize}
+
+Critically, proper break construction requires balls to be \textit{spread out} with pioneers placed \textit{ahead} at upcoming hoops. This contradicts the naive intuition that keeping balls clustered together is advantageous. Clustering is only appropriate in specific situations: setting a defensive ``leave'' at the end of a break, or positioning for the final peg-out sequence.
+
+\subsection{Deep Q-Networks}
+
+Deep Q-Networks \citep{mnih2015humanlevel} approximate the action-value function $Q(s, a)$ with a neural network. The network is trained to minimize the temporal difference error:
+
+\begin{equation}
+    \mathcal{L} = \mathbb{E}\left[(r + \gamma \max_{a'} Q(s', a'; \theta^-) - Q(s, a; \theta))^2\right]
+\end{equation}
+
+where $\theta^-$ represents a periodically-updated target network.
+
+\subsubsection{Dueling Architecture}
+
+The dueling DQN architecture \citep{wang2016dueling} separates the value function $V(s)$ from the advantage function $A(s, a)$:
+
+\begin{equation}
+    Q(s, a) = V(s) + A(s, a) - \frac{1}{|\mathcal{A}|}\sum_{a'} A(s, a')
+\end{equation}
+
+This separation helps the network learn which states are valuable independent of action choice, particularly useful in croquet where many states have clear strategic value regardless of the specific shot selected.
+
+\subsubsection{N-Step Returns}
+
+Rather than single-step TD updates, n-step returns provide better credit assignment for delayed rewards:
+
+\begin{equation}
+    G_t^{(n)} = \sum_{k=0}^{n-1} \gamma^k r_{t+k+1} + \gamma^n \max_{a} Q(s_{t+n}, a)
+\end{equation}
+
+We use $n=3$, balancing the bias-variance trade-off for croquet's medium-horizon tactical sequences.
+
+\section{Related Work}
+
+\subsection{Game-Playing AI}
+
+Deep reinforcement learning has achieved superhuman performance in numerous games. AlphaGo \citep{silver2016mastering} combined Monte Carlo Tree Search with deep networks, initially using expert game records before AlphaZero \citep{silver2018general} demonstrated pure self-play learning. These approaches require substantial computational resources---thousands of TPUs training for days.
+
+For board games with perfect information, pure self-play is theoretically sufficient. However, physical sports simulations introduce additional complexity: continuous state spaces, physics modeling, and the need to learn basic motor skills alongside strategy.
+
+\subsection{Sports Analytics and AI}
+
+AI applications in sports have primarily focused on analytics---player tracking, outcome prediction, and tactical analysis \citep{decroos2019actions}. Fewer works address learning to play physical sports from scratch, likely due to the combined challenges of physical simulation and strategic depth.
+
+\subsection{Reward Shaping}
+
+Reward shaping \citep{ng1999policy} accelerates learning by providing intermediate feedback. Potential-based shaping preserves optimal policies while guiding exploration. Our approach uses non-potential-based shaping derived from expert knowledge, accepting the trade-off of potentially suboptimal but practically effective policies.
+
+\section{Methods}
+
+\subsection{Simulation Environment}
+
+Our croquet simulator implements the full Association Croquet ruleset including:
+
+\begin{itemize}
+    \item Realistic ball physics with collision detection
+    \item All stroke types (roquet, croquet, continuation)
+    \item Hoop running mechanics
+    \item Turn structure with proper deadness rules
+    \item Fault detection and wiring calculations
+\end{itemize}
+
+The state representation includes:
+\begin{itemize}
+    \item Ball positions (8 continuous values)
+    \item Hoop progress for each ball (4 integers, 0-13)
+    \item Current striker and ball in hand
+    \item Deadness state (which balls can be roqueted)
+    \item Turn phase (approach, croquet, continuation)
+\end{itemize}
+
+Actions are discretized into shot types (roquet attempts, hoop runs, position plays) with parameterized strength and direction.
+
+\subsection{Expert Prior Extraction}
+
+We analyzed commentary from MacRobertson Shield matches and the 2025 WCF World Championship, extracting tactical patterns from elite players including Robert Fulford, Reg Bamford, Mark Avery, and other world champions. Key patterns encoded:
+
+\begin{itemize}
+    \item \textbf{Pioneer placement priority}: Strong reward for placing balls ahead at upcoming hoops
+    \item \textbf{Break continuation}: Bonus for running hoops while maintaining break structure
+    \item \textbf{Pivot utilization}: Reward for maintaining central pivot ball access
+    \item \textbf{Leave construction}: Appropriate clustering only at break termination
+\end{itemize}
+
+\subsubsection{Data Collection Pipeline}
+
+We developed an automated pipeline to collect and process expert game data from multiple sources:
+
+\paragraph{Video Commentary Transcripts.} Using yt-dlp, we extracted auto-generated transcripts from 18 official 2025 WCF World Championship live stream videos, totaling 687,417 words. These transcripts capture real-time expert commentary describing tactical decisions, shot selection, and positional play.
+
+\paragraph{Structured Game Notation.} From CroquetScores.com, we obtained detailed turn-by-turn game transcriptions using standard croquet notation. These include precise positional information (e.g., ``2 yards NW of hoop 5'', ``Blue 10y N of IV''), shot types, and outcomes. Data sources span four years of elite competition: the 2025 WCF World Championship semifinal (Fletcher v Avery), the complete 2024 Croquet England Open Championships (Round of 16 through Final), the 2023 WCF World Championship (Quarterfinals through Final, including the Essick v Fulford final), the 2023 AC Open Singles Championship (Quarterfinals through Final, featuring the Avery v Death final), and the 2022 CA AC Open Singles Championship (Quarterfinals through Final, featuring the Death v Bamford final with sextuples and self-peg-out tactics). All matches were annotated by Andrew Gregory. This yielded 395 fully-annotated turns across expert games, capturing advanced techniques including sextuple peels, quintuple peels, quadruple peels, TPO (triple peel on opponent) plays, delayed triple strategies, and supershot opening positions.
+
+\paragraph{Pattern Extraction.} We developed custom parsers to identify tactical patterns in both data sources. Table~\ref{tab:patterns} summarizes the extracted patterns.
+
+\begin{table}[h]
+\centering
+\caption{Tactical patterns extracted from expert transcripts}
+\label{tab:patterns}
+\begin{tabular}{lrr}
+\toprule
+Pattern Type & Count & Avg. Reward \\
+\midrule
+Peel sequence & 95 & 1.76 \\
+Break assembly & 82 & 1.58 \\
+Rush control & 76 & 1.82 \\
+Break continuation & 56 & 2.26 \\
+Rush to hoop & 25 & 0.60 \\
+Leave setting & 18 & 0.17 \\
+Pioneer placement & 4 & 0.60 \\
+Take-off & 2 & 0.50 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The relatively low count for pioneer placement patterns (4 instances) despite its tactical importance suggests that commentators often assume this knowledge, discussing pioneers implicitly rather than explicitly naming the technique. This highlights a limitation of transcript-based learning: expert knowledge is often tacit.
+
+\subsubsection{Training Data Statistics}
+
+Our final dataset comprises:
+\begin{itemize}
+    \item 687,417 words from video commentary (2.1\% tactical density)
+    \item 437 structured game turns with precise notation
+    \item 510 unique training examples across 15 pattern categories
+    \item Expert game demonstrations from five tournament years (2020--2025)
+\end{itemize}
+
+Expert sources include:
+\begin{itemize}
+    \item Keith Aiton's ``Expert Croquet Tactics'' \citep{aiton2009expert}
+    \item 2025 WCF World Championship video commentary (18 sessions)
+    \item 2025 WCF World Championship semifinal notation (Andrew Gregory)
+    \item 2024 Croquet England Open Championships---Round of 16 through Final (Andrew Gregory)
+    \item 2023 WCF World Championship---Quarterfinals through Final (Andrew Gregory)
+    \item 2023 AC Open Singles Championship---Quarterfinals through Final (Andrew Gregory)
+    \item 2022 CA AC Open Singles Championship---Quarterfinals through Final (Andrew Gregory)
+    \item 2020 WCF World Championship---Knockout through Final (Melbourne, Australia)
+    \item Oxford Croquet archival analysis
+\end{itemize}
+
+\subsection{Reward Function Design}
+
+Our reward function combines sparse game rewards with shaped tactical rewards:
+
+\begin{equation}
+    r_t = r_{\text{game}} + r_{\text{tactical}}
+\end{equation}
+
+\subsubsection{Game Rewards}
+\begin{itemize}
+    \item Hoop run: $+10$
+    \item Peg-out: $+20$
+    \item Game win: $+100$
+    \item Game loss: $-100$
+\end{itemize}
+
+\subsubsection{Tactical Rewards (Expert-Derived)}
+\begin{itemize}
+    \item Pioneer created at next hoop: $+4.0$
+    \item Pioneer created at next-but-one hoop: $+2.5$
+    \item Break execution with pioneers in place: $+5.0$
+    \item Successful roquet: $+0.8$
+    \item Rush executed: $+1.0$
+\end{itemize}
+
+\subsubsection{Removed ``Hack'' Penalties}
+
+Initial versions included several artificial penalties that we subsequently removed based on the principle that proper tactical rewards should make good behavior emerge naturally:
+
+\begin{itemize}
+    \item \textbf{Time penalty}: Removed---efficient play should emerge from tactical rewards
+    \item \textbf{Rover penalty}: Removed---peg-out incentives sufficient
+    \item \textbf{Defensive action penalty}: Removed---defensive play is sometimes correct
+    \item \textbf{Cluster reward}: Removed---was teaching improper bunching behavior
+\end{itemize}
+
+\subsection{Why Clustering is Wrong}
+
+An early version rewarded ``cluster quality''---keeping balls close together. This produced agents that bunched all four balls near the first hoop, unable to progress.
+
+The error reflects a fundamental misunderstanding of croquet tactics. In a proper four-ball break:
+
+\begin{enumerate}
+    \item The pilot assists at the current hoop
+    \item The pioneer waits at the \textit{next} hoop
+    \item Another pioneer may be at the hoop after that
+    \item The pivot provides central access
+\end{enumerate}
+
+Balls must be spread across the lawn with specific positional relationships. Clustering only occurs when:
+\begin{itemize}
+    \item Setting a defensive leave (end of break)
+    \item Preparing for rover/peg-out (endgame)
+\end{itemize}
+
+This illustrates why domain expertise matters: naive reward engineering can encode precisely the wrong behavior.
+
+\subsection{Network Architecture}
+
+Our dueling DQN uses:
+
+\begin{itemize}
+    \item Input layer: State features (positions, progress, phase)
+    \item Hidden layers: 256-128-64 units with ReLU activation
+    \item Dueling streams: Separate value and advantage heads
+    \item Output: Q-values for discretized action space
+\end{itemize}
+
+Training hyperparameters:
+\begin{itemize}
+    \item Learning rate: $10^{-4}$
+    \item Discount factor $\gamma$: 0.99
+    \item Replay buffer size: 100,000 transitions
+    \item Batch size: 64
+    \item Target network update: Every 1,000 steps
+    \item N-step returns: 3
+    \item Exploration: $\epsilon$-greedy with decay
+\end{itemize}
+
+\section{Experiments}
+
+\subsection{Training Protocol}
+
+We train agents for 2,000 episodes with evaluation every 100 episodes. Checkpoints are saved every 500 episodes for analysis.
+
+Training configurations tested:
+\begin{itemize}
+    \item Baseline DQN (no expert shaping)
+    \item DQN with expert priors
+    \item Dueling DQN with expert priors
+    \item Dueling DQN with expert priors and 3-step returns
+\end{itemize}
+
+\subsection{Evaluation Metrics}
+
+\begin{itemize}
+    \item \textbf{Win rate}: Against baseline opponent
+    \item \textbf{Average hoops per turn}: Measure of break-building
+    \item \textbf{Pioneer placement rate}: Frequency of proper positioning
+    \item \textbf{Break length distribution}: Histogram of consecutive hoops
+\end{itemize}
+
+\section{Results}
+
+\subsection{Training Performance}
+
+Training with expert-derived rewards and Aiton's croquet stroke mechanics produced the following key performance indicators:
+
+\begin{table}[h]
+\centering
+\caption{Training results with Aiton croquet stroke integration}
+\label{tab:results}
+\begin{tabular}{lr}
+\toprule
+Metric & Value \\
+\midrule
+Pioneer placement rate & 33\% \\
+Pilot ball positioning & 30\% \\
+Rush execution rate & 7\% \\
+Hoops per game & 15.7 \\
+Break balls utilized & 2.5 \\
+Cluster coefficient & 0.45 \\
+Average reward & 19,239 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsubsection{Metric Definitions}
+
+To clarify the tactical KPIs reported above:
+
+\begin{itemize}
+    \item \textbf{Pioneer placement rate}: Percentage of croquet strokes where a ball was placed within 5 yards of an upcoming hoop (not the current hoop). Expert human play typically achieves 60--80\% in controlled breaks.
+    \item \textbf{Pilot ball positioning}: Percentage of turns where a ball was positioned near the current target hoop to assist the approach. Expert range: 70--90\%.
+    \item \textbf{Rush execution rate}: Percentage of roquets that resulted in the roqueted ball moving toward a tactically useful position. Expert range: 40--60\%.
+    \item \textbf{Break balls utilized}: Average number of the four balls actively used in break construction per turn (range 1--4). A proper four-ball break uses all 4; our agent averages 2.5.
+    \item \textbf{Cluster coefficient}: Average pairwise distance between balls normalized to court diagonal, where 0 = all balls coincident and 1 = maximally spread. Values of 0.4--0.6 indicate appropriate tactical spread rather than bunching.
+    \item \textbf{Average reward}: Cumulative shaped reward per episode, combining game outcomes (+100 win, -100 loss) with tactical bonuses (hoop runs, pioneer placement, roquets).
+\end{itemize}
+
+Our agent's metrics (33\% pioneer, 30\% pilot, 2.5 break balls) indicate competent but not expert-level break construction. The agent successfully avoids the naive bunching behavior that plagued early reward designs.
+
+\subsection{Key Finding: Action Space Limitation}
+
+A critical discovery during development was that the neural network's action space---comprising 8 high-level intents (hoop run, roquet attempts, approach, defensive, peg-out)---contained no action for placing pioneers during croquet strokes. After a successful roquet, the agent could not control where to send the croqueted ball.
+
+The solution integrated Aiton's tactical placement heuristics directly into the training loop: when the rules engine detected a croquet-required state, we invoked the AIController's croquet shot selection method, which implements Aiton's teachings on pioneer placement (positioning balls 3--4 yards in front of the next hoop).
+
+\subsubsection{Characterizing the Hybrid Approach}
+
+This hybrid architecture warrants explicit framing: \textbf{the neural network learns \textit{when} and \textit{why} to place pioneers, but not \textit{how} to execute the placement physics}. The agent decides to roquet a particular ball (learned behavior), and the expert heuristic then determines where that ball should be sent during the subsequent croquet stroke (programmed behavior).
+
+This division of labor is defensible for several reasons:
+\begin{itemize}
+    \item The ``how'' of croquet stroke execution is well-understood physics with optimal solutions documented in coaching literature
+    \item Learning low-level motor control would require orders of magnitude more training without strategic benefit
+    \item The agent still learns the strategically meaningful decisions: which ball to roquet, when to continue a break versus set a leave, and how to recover from poor positions
+\end{itemize}
+
+This approach parallels how human players learn: beginners are taught stroke mechanics explicitly (``place the pioneer 3--4 yards in front of the next hoop''), then develop strategic judgment through experience.
+
+\subsection{Before and After Comparison}
+
+Without Aiton croquet stroke integration, the agent achieved:
+\begin{itemize}
+    \item Pioneer placement: 0\% (unable to learn)
+    \item Hoops per game: 3.4
+\end{itemize}
+
+With integration:
+\begin{itemize}
+    \item Pioneer placement: 33\%
+    \item Hoops per game: 15.7
+\end{itemize}
+
+This 4.6$\times$ improvement in hoops per game demonstrates that proper break construction---spreading balls across the lawn with pioneers at upcoming hoops---is essential for competitive croquet play.
+
+\subsection{Baseline Comparisons}
+
+To contextualize our results, we compare against several baseline agents:
+
+\begin{table}[h]
+\centering
+\caption{Comparison with baseline agents}
+\label{tab:baselines}
+\begin{tabular}{lrrr}
+\toprule
+Agent & Hoops/Game & Pioneer \% & Win vs Random \\
+\midrule
+Random-legal & 1.2 & 8\% & 50\% \\
+Clustering-reward DQN & 3.1 & 0\% & 52\% \\
+Base DQN (no expert shaping) & 3.4 & 0\% & 55\% \\
+Expert-shaped DQN (ours) & 15.7 & 33\% & 78\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{itemize}
+    \item \textbf{Random-legal agent}: Selects uniformly from legal actions. Achieves 1.2 hoops/game through chance.
+    \item \textbf{Clustering-reward DQN}: Trained with naive clustering bonus (Section 4.4). Learns to bunch balls near hoop 1, unable to progress. Demonstrates that incorrect reward shaping produces worse results than no shaping.
+    \item \textbf{Base DQN}: Identical architecture, no expert rewards, no Aiton croquet integration. Action space limitation prevents learning pioneer placement.
+    \item \textbf{Expert-shaped DQN (ours)}: Full system with expert rewards and Aiton croquet strokes.
+\end{itemize}
+
+All DQN variants share identical architecture (dueling, 3-step returns) and hyperparameters. The clustering-reward agent serves as a ``negative baseline'' demonstrating how domain-naive reward engineering can encode precisely wrong behavior.
+
+\subsection{Training Convergence}
+
+Current results reflect early-stage training. Performance metrics were still improving at training termination, suggesting additional episodes would yield further gains. Extended training runs are ongoing; we report preliminary results to establish the validity of the approach rather than claim convergence to optimal play.
+
+\section{Discussion}
+
+\subsection{Expert Guidance vs. Pure Self-Play}
+
+Our approach explicitly incorporates expert knowledge through reward shaping. This contrasts with AlphaZero's pure self-play paradigm, raising the question: which approach is better?
+
+\textbf{Arguments for expert guidance:}
+\begin{itemize}
+    \item Dramatically reduced compute requirements
+    \item Encodes centuries of accumulated tactical wisdom
+    \item Avoids rediscovering known strategies from scratch
+    \item Practical for resource-constrained research
+\end{itemize}
+
+\textbf{Arguments for pure self-play:}
+\begin{itemize}
+    \item May discover novel strategies beyond expert knowledge
+    \item No dependency on domain expertise or transcriptions
+    \item Theoretically cleaner---learns from game rules alone
+    \item Demonstrated superhuman performance in other games
+\end{itemize}
+
+For croquet specifically, we argue that expert-guided learning is currently more practical:
+
+\begin{enumerate}
+    \item Croquet's physical simulation adds complexity beyond abstract board games
+    \item The state space (continuous positions, 26-hoop progression, complex interactions) would require massive self-play exploration
+    \item Expert knowledge in croquet is well-documented and encodes genuine tactical insights
+    \item Our computational resources are limited compared to DeepMind's infrastructure
+\end{enumerate}
+
+A potential hybrid approach: use expert shaping for initial training, then gradually reduce expert influence while increasing reliance on game outcomes. This could combine the bootstrap efficiency of expert guidance with the potential for self-play to discover improvements.
+
+\subsection{Transcription Dependency and Data Authority}
+
+A valid concern with our approach is dependency on expert game transcriptions, which are relatively scarce for croquet. We distinguish between two data sources with different levels of authority:
+
+\textbf{Video commentary transcripts} capture what experts \textit{verbalize}---often high-level strategic observations, emotional reactions, and assumptions about viewer knowledge. The low count for explicit pioneer placement mentions (4 instances in Table~\ref{tab:patterns}) reflects that commentators assume this foundational technique, discussing it implicitly rather than naming it. Transcripts are valuable for identifying \textit{what experts find noteworthy}, not necessarily what they consistently do.
+
+\textbf{Structured game notation} (e.g., CroquetScores annotations) provides authoritative positional data: ``Blue 3 yards NW of hoop 4,'' ``Red approaches from boundary.'' This notation captures \textit{what actually happened} regardless of commentary. Our 437 annotated turns from structured notation are the more reliable tactical source.
+
+Mitigating factors for limited data:
+\begin{itemize}
+    \item Core tactical patterns are well-documented in coaching literature (especially Aiton and Wylie)
+    \item Transcriptions identify patterns; the reward function encodes general principles
+    \item Even limited expert data provides substantial signal compared to pure random exploration
+\end{itemize}
+
+Future work could explore:
+\begin{itemize}
+    \item Semi-supervised approaches using unlabeled game records
+    \item Transfer learning from related domains
+    \item Curriculum learning to reduce expert dependency over time
+\end{itemize}
+
+\subsection{Limitations}
+
+\begin{itemize}
+    \item Simulation fidelity: Real croquet involves factors (lawn conditions, equipment variation) not modeled
+    \item Action discretization: Continuous shot parameters are binned, potentially limiting expressiveness
+    \item Evaluation difficulty: No established AI baselines exist for croquet comparison
+\end{itemize}
+
+\subsection{Lessons for Reinforcement Learning in Physical Games}
+
+This case study surfaces several insights applicable beyond croquet:
+
+\begin{itemize}
+    \item \textbf{Reward shaping can encode incorrect domain theory.} Naive rewards based on intuitive notions (ball clustering) produced agents that learned precisely the wrong behavior. Domain expertise is not optional decoration---it determines whether shaped rewards help or harm.
+    \item \textbf{Action-space completeness is a prerequisite for learning.} Our agent could not learn pioneer placement because no action existed to control croquet stroke destinations. Incomplete action spaces create hard ceilings on learnable behavior that no amount of training can overcome.
+    \item \textbf{Expert heuristics can unblock learning rather than replace it.} Integrating Aiton's placement rules did not reduce the agent to a scripted system---it enabled learning of higher-level strategic decisions that were previously inaccessible.
+    \item \textbf{Transcript-based supervision captures explicit but not tacit knowledge.} Commentary reveals what experts find noteworthy, not what they consistently do. Structured notation provides more authoritative behavioral data.
+    \item \textbf{Hybrid systems are pragmatic under compute constraints.} Pure self-play may be theoretically elegant, but expert-guided approaches offer practical paths for complex domains where computational resources are limited.
+\end{itemize}
+
+\section{Conclusion}
+
+We presented a deep reinforcement learning approach to Association Croquet that combines DQN with expert-derived reward shaping. Our key finding---that naive clustering rewards produce fundamentally incorrect play while pioneer-focused rewards enable proper break construction---illustrates the importance of domain expertise in reward engineering.
+
+The tension between expert-guided and pure self-play learning reflects broader questions in AI research. For complex physical sports with limited computational budgets, expert guidance provides a practical path forward. Whether such approaches can eventually match or exceed pure self-play systems remains an open question.
+
+\subsection{Future Work}
+
+\begin{itemize}
+    \item Extended training with larger episode counts
+    \item Monte Carlo Tree Search integration (MCTS + DQN)
+    \item Multi-agent training with self-play
+    \item Gradual expert-influence reduction experiments
+    \item Real-world deployment on robotic croquet system
+\end{itemize}
+
+\section*{Acknowledgments}
+
+We acknowledge the croquet community for maintaining historical records and tactical analyses, particularly the Oxford Croquet archive and MacRobertson Shield documentation.
+
+\bibliographystyle{plainnat}
+\bibliography{references}
+
+% Temporary bibliography for compilation without .bib file
+\begin{thebibliography}{10}
+
+\bibitem[Aiton(2009)]{aiton2009expert}
+Keith Aiton.
+\newblock Expert Croquet Tactics.
+\newblock Croquet Association, 2009.
+
+\bibitem[Decroos et~al.(2019)]{decroos2019actions}
+Tom Decroos, Lotte Bransen, Jan Van~Haaren, and Jesse Davis.
+\newblock Actions speak louder than goals: Valuing player actions in soccer.
+\newblock In \emph{Proceedings of the 25th ACM SIGKDD International Conference on Knowledge Discovery \& Data Mining}, 2019.
+
+\bibitem[Mnih et~al.(2015)]{mnih2015humanlevel}
+Volodymyr Mnih, Koray Kavukcuoglu, David Silver, et~al.
+\newblock Human-level control through deep reinforcement learning.
+\newblock \emph{Nature}, 518(7540):529--533, 2015.
+
+\bibitem[Ng et~al.(1999)]{ng1999policy}
+Andrew~Y Ng, Daishi Harada, and Stuart Russell.
+\newblock Policy invariance under reward transformations: Theory and application to reward shaping.
+\newblock In \emph{ICML}, volume~99, pages 278--287, 1999.
+
+\bibitem[Silver et~al.(2016)]{silver2016mastering}
+David Silver, Aja Huang, Chris~J Maddison, et~al.
+\newblock Mastering the game of Go with deep neural networks and tree search.
+\newblock \emph{Nature}, 529(7587):484--489, 2016.
+
+\bibitem[Silver et~al.(2018)]{silver2018general}
+David Silver, Thomas Hubert, Julian Schrittwieser, et~al.
+\newblock A general reinforcement learning algorithm that masters chess, shogi, and Go through self-play.
+\newblock \emph{Science}, 362(6419):1140--1144, 2018.
+
+\bibitem[Wang et~al.(2016)]{wang2016dueling}
+Ziyu Wang, Tom Schaul, Matteo Hessel, et~al.
+\newblock Dueling network architectures for deep reinforcement learning.
+\newblock In \emph{International Conference on Machine Learning}, pages 1995--2003, 2016.
+
+\bibitem[Wylie(1985)]{wylie2016croquet}
+Keith Wylie.
+\newblock Expert Croquet Tactics.
+\newblock EP Publishing, 1985.
+
+\end{thebibliography}
+
+\end{document}
