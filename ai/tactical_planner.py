@@ -73,7 +73,7 @@ class PlannerOutput:
 class PlannerConfig:
     """Configuration for the tactical planner."""
     # LLM settings
-    model: str = "claude-sonnet-4-20250514"
+    model: str = "claude-sonnet-4-6"
     max_tokens: int = 1500
     temperature: float = 0.0  # Deterministic for repeatability
     timeout_ms: int = 10000
